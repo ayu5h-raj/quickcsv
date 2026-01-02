@@ -50,6 +50,12 @@ humansize = "2.1"
 # SIMD-accelerated byte searching for fast row indexing
 memchr = "2.7"
 
+# JSON parsing and formatting
+serde_json = "1.0"
+
+# Clipboard support
+arboard = "3.4"
+
 [profile.release]
 opt-level = 3
 lto = true

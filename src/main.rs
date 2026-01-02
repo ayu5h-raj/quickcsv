@@ -192,6 +192,25 @@ impl Default for SearchState {
     }
 }
 
+/// JSON viewer popup state
+#[derive(Default)]
+struct JsonViewerState {
+    /// Whether the popup is open
+    open: bool,
+    /// Raw content from the cell
+    raw_content: String,
+    /// Formatted JSON (if valid)
+    formatted_content: String,
+    /// Whether the content is valid JSON
+    is_valid_json: bool,
+    /// Row index of the cell
+    row: usize,
+    /// Column index of the cell
+    col: usize,
+    /// Column name for display
+    column_name: String,
+}
+
 /// Main application state
 struct FastCsvApp {
     /// Shared state with background thread
@@ -208,6 +227,8 @@ struct FastCsvApp {
     last_visible_range: (usize, usize),
     /// Search state
     search: SearchState,
+    /// JSON viewer popup state
+    json_viewer: JsonViewerState,
 }
 
 impl Default for FastCsvApp {
@@ -220,6 +241,7 @@ impl Default for FastCsvApp {
             row_cache: std::collections::HashMap::new(),
             last_visible_range: (0, 0),
             search: SearchState::default(),
+            json_viewer: JsonViewerState::default(),
         }
     }
 }
@@ -665,24 +687,68 @@ impl FastCsvApp {
 
                             // Render each cell with ON-THE-FLY search highlighting
                             // This is O(visible_rows) per frame - no memory overhead!
-                            for field in fields.iter() {
+                            for (col_idx, field) in fields.iter().enumerate() {
                                 row.col(|ui| {
                                     // Check if this cell matches the search query
                                     let is_match = !search_query.is_empty()
                                         && field.to_lowercase().contains(&search_query);
 
-                                    if is_match && is_current_nav_row {
+                                    // Check if this looks like JSON
+                                    let is_json = looks_like_json(field);
+
+                                    // Create a clickable label
+                                    let response = if is_match && is_current_nav_row {
                                         // Current navigation row match - bright orange
                                         let rect = ui.available_rect_before_wrap();
                                         ui.painter().rect_filled(rect, 2.0, CURRENT_MATCH_COLOR);
-                                        ui.label(egui::RichText::new(field).color(Color32::BLACK));
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(field).color(Color32::BLACK),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
                                     } else if is_match {
                                         // Other matches - yellow background
                                         let rect = ui.available_rect_before_wrap();
                                         ui.painter().rect_filled(rect, 2.0, HIGHLIGHT_COLOR);
-                                        ui.label(egui::RichText::new(field).color(Color32::BLACK));
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(field).color(Color32::BLACK),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
+                                    } else if is_json {
+                                        // JSON content - show with subtle indicator
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(field)
+                                                    .color(Color32::from_rgb(100, 180, 255)),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
                                     } else {
-                                        ui.label(field);
+                                        ui.add(egui::Label::new(field).sense(egui::Sense::click()))
+                                    };
+
+                                    // Handle double-click to open JSON viewer
+                                    if response.double_clicked() && is_json {
+                                        // Get column name
+                                        let col_name = headers
+                                            .get(col_idx)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!("Column {col_idx}"));
+
+                                        // Try to format the JSON
+                                        let formatted = format_json(field);
+
+                                        self.json_viewer.open = true;
+                                        self.json_viewer.raw_content = field.clone();
+                                        self.json_viewer.formatted_content =
+                                            formatted.clone().unwrap_or_else(|| field.clone());
+                                        self.json_viewer.is_valid_json = formatted.is_some();
+                                        self.json_viewer.row = row_idx;
+                                        self.json_viewer.col = col_idx;
+                                        self.json_viewer.column_name = col_name;
                                     }
                                 });
                             }
@@ -737,6 +803,99 @@ impl FastCsvApp {
                 );
             }
         });
+    }
+
+    /// Render the JSON viewer popup
+    fn render_json_popup(&mut self, ctx: &egui::Context) {
+        if !self.json_viewer.open {
+            return;
+        }
+
+        // Handle Escape to close
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.json_viewer.open = false;
+            return;
+        }
+
+        // Copy values to avoid borrow issues
+        let title = format!("JSON Viewer - {}", self.json_viewer.column_name);
+        let row_info = format!(
+            "Row: {} | Column: {}",
+            format_number(self.json_viewer.row + 1),
+            self.json_viewer.column_name
+        );
+        let is_valid = self.json_viewer.is_valid_json;
+        let formatted = self.json_viewer.formatted_content.clone();
+        let raw = self.json_viewer.raw_content.clone();
+
+        let mut should_close = false;
+
+        egui::Window::new(title)
+            .default_size([500.0, 400.0])
+            .resizable(true)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                // Header with row/column info
+                ui.horizontal(|ui| {
+                    ui.label(&row_info);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if is_valid {
+                            ui.label(
+                                egui::RichText::new("✓ Valid JSON")
+                                    .color(Color32::from_rgb(100, 200, 100)),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new("⚠ Invalid JSON")
+                                    .color(Color32::from_rgb(255, 150, 100)),
+                            );
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                // Scrollable JSON content
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut formatted.as_str())
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(20)
+                                .interactive(false),
+                        );
+                    });
+
+                ui.separator();
+
+                // Action buttons
+                ui.horizontal(|ui| {
+                    if ui.button("📋 Copy Formatted").clicked() {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(&formatted);
+                        }
+                    }
+
+                    if ui.button("📋 Copy Raw").clicked() {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(&raw);
+                        }
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+            });
+
+        if should_close {
+            self.json_viewer.open = false;
+        }
     }
 }
 
@@ -896,6 +1055,9 @@ impl eframe::App for FastCsvApp {
             }
         });
 
+        // Render JSON viewer popup (if open)
+        self.render_json_popup(ctx);
+
         // Handle dropped files
         ctx.input(|i| {
             for file in &i.raw.dropped_files {
@@ -1011,6 +1173,19 @@ fn format_number(n: usize) -> String {
 fn format_file_size(bytes: u64) -> String {
     use humansize::{format_size, BINARY};
     format_size(bytes, BINARY)
+}
+
+/// Check if a string looks like JSON (starts with { or [)
+fn looks_like_json(s: &str) -> bool {
+    let trimmed = s.trim();
+    (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+}
+
+/// Try to parse and format JSON, returns None if invalid
+fn format_json(s: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(s).ok()?;
+    serde_json::to_string_pretty(&value).ok()
 }
 
 fn main() -> eframe::Result<()> {
