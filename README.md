@@ -12,59 +12,41 @@ A blazing-fast CSV viewer for macOS that handles files from 100MB to 2GB+ with z
 - 📊 **Handle Massive Files** - 100MB to 2GB+ with smooth scrolling
 - ⚡ **Virtualized Table** - Only visible rows are rendered
 - 🔍 **Fast Search** - Search millions of rows without freezing
+- 📄 **JSON Viewer** - Double-click JSON cells to view formatted content
 - 🎨 **Native macOS Look** - Dark theme, native file dialogs
 - 📁 **Drag & Drop** - Just drop your CSV file
 
 ## Download
 
-Download the latest release from the [Releases page](../../releases).
+Download the latest `QuickCSV.app` from the [Releases page](../../releases).
 
-Or build from source:
+## Build from Source
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/quickcsv.git
+git clone https://github.com/AyushRaj4/quickcsv.git
 cd quickcsv
 
-# Build release version
-cargo build --release
-
-# Run
+# Build and run
 cargo run --release
 ```
 
-## Create macOS App Bundle
+### Create macOS App Bundle
 
 ```bash
-# Install cargo-bundle (one time)
-cargo install cargo-bundle
-
-# Create .app bundle
+cargo install cargo-bundle  # one time
 cargo bundle --release
-
-# The app will be at: target/release/bundle/osx/QuickCSV.app
+# Output: target/release/bundle/osx/QuickCSV.app
 ```
 
 ## How It Works
 
-```
-CSV File → Memory Map → Background Indexer → Row Offset Index → Virtualized Table
-```
+QuickCSV uses memory-mapped I/O to handle large files efficiently:
 
-1. **Memory Mapping**: File is mapped to memory using `memmap2` - no loading into RAM
-2. **Background Indexing**: A thread scans for newlines to build a row offset index
-3. **Virtualized Rendering**: Only visible rows are parsed and rendered using `egui_extras::TableBuilder`
-4. **Row Caching**: Recently viewed rows are cached for smooth scrolling
-
-## Dependencies
-
-| Crate | Purpose |
-|-------|---------|
-| `eframe` | GUI framework |
-| `egui_extras` | Virtualized table |
-| `memmap2` | Memory-mapped I/O |
-| `csv` | CSV parsing |
-| `rfd` | Native file dialogs |
+1. **Memory Mapping** - File is mapped directly to memory (no loading into RAM)
+2. **Background Indexing** - Row offsets are indexed in a background thread
+3. **Virtualized Rendering** - Only visible rows are parsed and rendered
+4. **Row Caching** - Recently viewed rows are cached for smooth scrolling
 
 ## Performance
 
@@ -83,52 +65,14 @@ Tested on MacBook Pro M1:
 | `⌘O` | Open file |
 | `⌘F` | Find/Search |
 | `Enter` | Execute search |
-| `Escape` | Close search |
-| `F3` | Next match |
+| `Escape` | Close search/popup |
+| `F3` / `⌘G` | Next match |
 | `⇧F3` | Previous match |
-| `⌘Q` | Quit |
-
-## Distribution
-
-### For Users
-Download `QuickCSV.app` from Releases and drag to your Applications folder.
-
-### For Developers
-
-**Create .app bundle:**
-```bash
-cargo bundle --release
-# Output: target/release/bundle/osx/QuickCSV.app
-```
-
-**Create ZIP for distribution:**
-```bash
-cd target/release/bundle/osx
-zip -r QuickCSV-macos.zip QuickCSV.app
-```
-
-**Create DMG (optional):**
-```bash
-brew install create-dmg
-create-dmg \
-  --volname "QuickCSV" \
-  --window-size 600 400 \
-  --icon "QuickCSV.app" 150 185 \
-  --app-drop-link 450 185 \
-  QuickCSV.dmg \
-  target/release/bundle/osx/QuickCSV.app
-```
-
-### GitHub Releases
-1. Tag a release: `git tag v0.1.0 && git push --tags`
-2. Build the app bundle: `cargo bundle --release`
-3. Create ZIP: `zip -r QuickCSV-v0.1.0-macos.zip target/release/bundle/osx/QuickCSV.app`
-4. Upload to GitHub Releases
-
-## License
-
-MIT
 
 ## Contributing
 
 Pull requests welcome! Please open an issue first to discuss major changes.
+
+## License
+
+MIT

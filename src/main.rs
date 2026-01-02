@@ -164,6 +164,8 @@ impl Default for SearchResults {
 struct SearchState {
     /// Whether search bar is visible
     visible: bool,
+    /// Whether to focus the input field (set when opening search)
+    focus_input: bool,
     /// Current search query (in the text field)
     query: String,
     /// The active/confirmed search query (lowercase, for matching)
@@ -176,18 +178,28 @@ struct SearchState {
     results: Arc<RwLock<SearchResults>>,
     /// Flag to cancel ongoing search
     cancel_flag: Arc<AtomicBool>,
+    /// Search history (most recent at the end)
+    history: Vec<String>,
+    /// Current position in history (None = not browsing history)
+    history_index: Option<usize>,
+    /// Temporary storage for current query when browsing history
+    history_temp_query: String,
 }
 
 impl Default for SearchState {
     fn default() -> Self {
         Self {
             visible: false,
+            focus_input: false,
             query: String::new(),
             active_query: String::new(),
             current_index: 0,
             scroll_to_row: None,
             results: Arc::new(RwLock::new(SearchResults::default())),
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            history: Vec::new(),
+            history_index: None,
+            history_temp_query: String::new(),
         }
     }
 }
@@ -339,6 +351,20 @@ impl FastCsvApp {
             results.status = SearchStatus::Idle;
             return;
         }
+
+        // Add to search history (if not duplicate of last entry)
+        let query_for_history = self.search.query.trim().to_string();
+        if !query_for_history.is_empty() {
+            // Remove if already exists (to move to end)
+            self.search.history.retain(|h| h != &query_for_history);
+            self.search.history.push(query_for_history);
+            // Keep history limited to last 50 entries
+            if self.search.history.len() > 50 {
+                self.search.history.remove(0);
+            }
+        }
+        // Reset history navigation
+        self.search.history_index = None;
 
         // Cancel any previous search
         self.search.cancel_flag.store(true, Ordering::SeqCst);
@@ -493,9 +519,58 @@ impl FastCsvApp {
                     .desired_width(250.0),
             );
 
-            // Execute search on Enter
-            if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            // Auto-focus when search bar opens
+            if self.search.focus_input {
+                response.request_focus();
+                self.search.focus_input = false;
+            }
+
+            // Handle up/down arrow for history navigation (only when focused)
+            if response.has_focus() && !self.search.history.is_empty() {
+                let up_pressed = ui.input(|i| i.key_pressed(Key::ArrowUp));
+                let down_pressed = ui.input(|i| i.key_pressed(Key::ArrowDown));
+
+                if up_pressed {
+                    match self.search.history_index {
+                        None => {
+                            // Save current query and start browsing from most recent
+                            self.search.history_temp_query = self.search.query.clone();
+                            self.search.history_index = Some(self.search.history.len() - 1);
+                            self.search.query =
+                                self.search.history.last().cloned().unwrap_or_default();
+                        }
+                        Some(idx) if idx > 0 => {
+                            // Go to older entry
+                            self.search.history_index = Some(idx - 1);
+                            self.search.query = self.search.history[idx - 1].clone();
+                        }
+                        _ => {} // Already at oldest entry
+                    }
+                }
+
+                if down_pressed {
+                    match self.search.history_index {
+                        Some(idx) if idx < self.search.history.len() - 1 => {
+                            // Go to newer entry
+                            self.search.history_index = Some(idx + 1);
+                            self.search.query = self.search.history[idx + 1].clone();
+                        }
+                        Some(_) => {
+                            // Back to the original query
+                            self.search.history_index = None;
+                            self.search.query = self.search.history_temp_query.clone();
+                        }
+                        None => {} // Not browsing history
+                    }
+                }
+            }
+
+            // Execute search on Enter (keep focus on input)
+            let enter_pressed = ui.input(|i| i.key_pressed(Key::Enter));
+            if enter_pressed && (response.has_focus() || response.lost_focus()) {
                 self.execute_search(ctx);
+                // Request focus back so user can edit query
+                response.request_focus();
             }
 
             // Search button (disabled during search)
@@ -505,6 +580,8 @@ impl FastCsvApp {
                 .clicked()
             {
                 self.execute_search(ctx);
+                // Also keep focus on input after button click
+                response.request_focus();
             }
 
             // Cancel button during search
@@ -818,79 +895,133 @@ impl FastCsvApp {
         }
 
         // Copy values to avoid borrow issues
-        let title = format!("JSON Viewer - {}", self.json_viewer.column_name);
-        let row_info = format!(
-            "Row: {} | Column: {}",
-            format_number(self.json_viewer.row + 1),
-            self.json_viewer.column_name
-        );
+        let column_name = self.json_viewer.column_name.clone();
+        let row_num = format_number(self.json_viewer.row + 1);
         let is_valid = self.json_viewer.is_valid_json;
         let formatted = self.json_viewer.formatted_content.clone();
         let raw = self.json_viewer.raw_content.clone();
 
         let mut should_close = false;
 
-        egui::Window::new(title)
-            .default_size([500.0, 400.0])
+        egui::Window::new("📄 JSON Viewer")
+            .default_size([550.0, 450.0])
+            .min_size([400.0, 300.0])
             .resizable(true)
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                // Header with row/column info
+                ui.add_space(4.0);
+
+                // Header info bar with location and validation status
                 ui.horizontal(|ui| {
-                    ui.label(&row_info);
+                    // Location info with icons
+                    ui.label(egui::RichText::new("📍").size(14.0));
+                    ui.label(
+                        egui::RichText::new(format!("Row {}", row_num))
+                            .color(Color32::from_rgb(180, 180, 180)),
+                    );
+                    ui.label(egui::RichText::new("•").color(Color32::from_rgb(100, 100, 100)));
+                    ui.label(
+                        egui::RichText::new(&column_name)
+                            .color(Color32::from_rgb(130, 180, 230))
+                            .strong(),
+                    );
+
+                    // Right-aligned validation badge
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if is_valid {
-                            ui.label(
-                                egui::RichText::new("✓ Valid JSON")
-                                    .color(Color32::from_rgb(100, 200, 100)),
-                            );
+                            egui::Frame::none()
+                                .fill(Color32::from_rgb(30, 70, 40))
+                                .rounding(4.0)
+                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new("✓ Valid JSON")
+                                            .color(Color32::from_rgb(120, 220, 120))
+                                            .size(12.0),
+                                    );
+                                });
                         } else {
-                            ui.label(
-                                egui::RichText::new("⚠ Invalid JSON")
-                                    .color(Color32::from_rgb(255, 150, 100)),
-                            );
+                            egui::Frame::none()
+                                .fill(Color32::from_rgb(80, 50, 30))
+                                .rounding(4.0)
+                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new("⚠ Invalid JSON")
+                                            .color(Color32::from_rgb(255, 180, 100))
+                                            .size(12.0),
+                                    );
+                                });
                         }
                     });
                 });
 
-                ui.separator();
+                ui.add_space(8.0);
 
-                // Scrollable JSON content
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
+                // JSON content area with distinct background
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(25, 25, 30))
+                    .rounding(6.0)
+                    .inner_margin(12.0)
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(50, 50, 60)))
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut formatted.as_str())
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(20)
-                                .interactive(false),
-                        );
+                        egui::ScrollArea::both()
+                            .auto_shrink([false, false])
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut formatted.as_str())
+                                        .font(egui::TextStyle::Monospace)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(15)
+                                        .interactive(false)
+                                        .text_color(Color32::from_rgb(200, 200, 210)),
+                                );
+                            });
                     });
 
-                ui.separator();
+                ui.add_space(12.0);
 
-                // Action buttons
+                // Action buttons with better styling
                 ui.horizontal(|ui| {
-                    if ui.button("📋 Copy Formatted").clicked() {
+                    // Copy buttons on the left
+                    if ui
+                        .add(egui::Button::new("📋 Copy Formatted").min_size([120.0, 28.0].into()))
+                        .clicked()
+                    {
                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
                             let _ = clipboard.set_text(&formatted);
                         }
                     }
 
-                    if ui.button("📋 Copy Raw").clicked() {
+                    ui.add_space(8.0);
+
+                    if ui
+                        .add(egui::Button::new("📄 Copy Raw").min_size([100.0, 28.0].into()))
+                        .clicked()
+                    {
                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
                             let _ = clipboard.set_text(&raw);
                         }
                     }
 
+                    // Close button on the right
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Close").clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new("✕ Close")
+                                    .min_size([80.0, 28.0].into())
+                                    .fill(Color32::from_rgb(60, 60, 70)),
+                            )
+                            .clicked()
+                        {
                             should_close = true;
                         }
                     });
                 });
+
+                ui.add_space(4.0);
             });
 
         if should_close {
@@ -906,27 +1037,18 @@ impl eframe::App for FastCsvApp {
             // Cmd/Ctrl+F to toggle search
             if i.modifiers.command && i.key_pressed(Key::F) {
                 self.search.visible = !self.search.visible;
-                if !self.search.visible {
-                    // Cancel and clear search when closing
-                    self.search.cancel_flag.store(true, Ordering::SeqCst);
-                    self.search.query.clear();
-                    self.search.active_query.clear();
-                    let mut results = self.search.results.write();
-                    results.navigation_rows.clear();
-                    results.total_match_count = 0;
-                    results.status = SearchStatus::Idle;
+                if self.search.visible {
+                    // Request focus on the search input and select all text
+                    self.search.focus_input = true;
                 }
+                // Note: We don't clear the query when closing - it persists for convenience
             }
-            // Escape to close search
+            // Escape to close search (keeps query text for convenience)
             if i.key_pressed(Key::Escape) && self.search.visible {
                 self.search.cancel_flag.store(true, Ordering::SeqCst);
                 self.search.visible = false;
-                self.search.query.clear();
-                self.search.active_query.clear();
-                let mut results = self.search.results.write();
-                results.navigation_rows.clear();
-                results.total_match_count = 0;
-                results.status = SearchStatus::Idle;
+                // Reset history navigation
+                self.search.history_index = None;
             }
             // F3 or Cmd+G for next match
             if i.key_pressed(Key::F3) || (i.modifiers.command && i.key_pressed(Key::G)) {
