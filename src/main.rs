@@ -486,10 +486,8 @@ impl FastCsvApp {
             }
 
             // Cancel button during search
-            if is_searching {
-                if ui.button("Cancel").clicked() {
-                    self.search.cancel_flag.store(true, Ordering::SeqCst);
-                }
+            if is_searching && ui.button("Cancel").clicked() {
+                self.search.cancel_flag.store(true, Ordering::SeqCst);
             }
 
             ui.separator();
@@ -916,10 +914,10 @@ fn load_and_index_csv(
     state: &Arc<RwLock<SharedState>>,
 ) -> Result<MappedCsv, String> {
     // Open and memory-map the file
-    let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
+    let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
     let metadata = file
         .metadata()
-        .map_err(|e| format!("Failed to read metadata: {}", e))?;
+        .map_err(|e| format!("Failed to read metadata: {e}"))?;
     let file_size = metadata.len();
 
     if file_size == 0 {
@@ -928,7 +926,7 @@ fn load_and_index_csv(
 
     // Safety: We're only reading the file, and it won't be modified while we have it mapped
     let mmap =
-        unsafe { Mmap::map(&file) }.map_err(|e| format!("Failed to memory-map file: {}", e))?;
+        unsafe { Mmap::map(&file) }.map_err(|e| format!("Failed to memory-map file: {e}"))?;
 
     // Index row offsets by scanning for newlines
     let mut row_offsets = Vec::with_capacity((file_size / 50) as usize); // Estimate ~50 bytes per row
