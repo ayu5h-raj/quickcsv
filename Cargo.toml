@@ -1,9 +1,29 @@
 [package]
-name = "fastcsv"
+name = "quickcsv"
 version = "0.1.0"
 edition = "2021"
 description = "High-performance CSV viewer for macOS"
-authors = ["FastCSV Team"]
+authors = ["QuickCSV Team"]
+license = "MIT"
+repository = "https://github.com/yourusername/quickcsv"
+
+# macOS App Bundle configuration
+[package.metadata.bundle]
+name = "QuickCSV"
+identifier = "com.quickcsv.app"
+# icon = ["icons/icon.icns"]  # Uncomment when you have an icon
+version = "0.1.0"
+copyright = "Copyright © 2026 QuickCSV Team"
+category = "Developer Tool"
+short_description = "High-performance CSV viewer"
+long_description = """
+FastCSV is a blazing-fast CSV viewer for macOS that handles files 
+from 100MB to 2GB+ with zero lag using memory-mapped I/O and 
+virtualized rendering.
+"""
+# File type associations
+[package.metadata.bundle.osx]
+minimum_system_version = "10.14"
 
 [dependencies]
 # GUI framework - immediate mode, native macOS support

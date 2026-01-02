@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Triggers on version tags like v0.1.0, v1.0.0, etc.
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Create macOS app bundle
+        run: cargo bundle --release
+
+      - name: Create ZIP archive
+        run: |
+          cd target/release/bundle/osx
+          zip -r QuickCSV-${{ github.ref_name }}-macos.zip QuickCSV.app
+          mv QuickCSV-${{ github.ref_name }}-macos.zip ../../../../
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickCSV-macos
+          path: QuickCSV-${{ github.ref_name }}-macos.zip
+
+  create-release:
+    needs: build-macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: QuickCSV-macos
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: QuickCSV ${{ github.ref_name }}
+          body: |
+            ## QuickCSV ${{ github.ref_name }}
+            
+            A blazing-fast CSV viewer for macOS that handles files from 100MB to 2GB+ with zero lag.
+            
+            ### Installation
+            1. Download `QuickCSV-${{ github.ref_name }}-macos.zip`
+            2. Unzip the file
+            3. Drag `QuickCSV.app` to your Applications folder
+            4. Right-click and select "Open" (first time only, to bypass Gatekeeper)
+            
+            ### Features
+            - 🚀 Instant file opening with memory-mapped I/O
+            - 📊 Handle massive CSV files (2GB+)
+            - 🔍 Fast search across millions of rows
+            - ⚡ Smooth scrolling with virtualized rendering
+          files: |
+            QuickCSV-${{ github.ref_name }}-macos.zip
+          draft: false
+          prerelease: false

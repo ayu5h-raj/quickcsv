@@ -1,4 +1,4 @@
-//! FastCSV - High-Performance CSV Viewer for macOS
+//! QuickCSV - High-Performance CSV Viewer for macOS
 //!
 //! A memory-mapped, virtualized CSV viewer that can handle files from 100MB to 2GB+
 //! with zero lag. Uses memmap2 for zero-copy file loading and egui for the UI.
@@ -79,9 +79,9 @@ impl MappedCsv {
             .from_reader(bytes);
 
         reader.records().next().and_then(|result| {
-            result.ok().map(|record| {
-                record.iter().map(|s| s.to_string()).collect()
-            })
+            result
+                .ok()
+                .map(|record| record.iter().map(|s| s.to_string()).collect())
         })
     }
 }
@@ -123,7 +123,7 @@ enum SearchStatus {
 }
 
 /// Shared search results (updated by background thread)
-/// 
+///
 /// Design: We DON'T store all matches. Instead:
 /// - Count total matches for display
 /// - Store limited navigation rows (first N rows with matches)
@@ -300,14 +300,14 @@ impl FastCsvApp {
     }
 
     /// Execute search across all columns in a background thread
-    /// 
+    ///
     /// This search is optimized for large files:
     /// - Counts ALL matches (no limit) for accurate totals
     /// - Only stores limited navigation rows (for prev/next)
     /// - Highlighting is done on-the-fly during rendering
     fn execute_search(&mut self, ctx: &egui::Context) {
         let query = self.search.query.trim().to_lowercase();
-        
+
         // Don't search if query is empty
         if query.is_empty() {
             self.search.cancel_flag.store(true, Ordering::SeqCst);
@@ -320,21 +320,21 @@ impl FastCsvApp {
 
         // Cancel any previous search
         self.search.cancel_flag.store(true, Ordering::SeqCst);
-        
+
         // Create new cancel flag for this search
         self.search.cancel_flag = Arc::new(AtomicBool::new(false));
         let cancel_flag = Arc::clone(&self.search.cancel_flag);
-        
+
         // Reset search state
         self.search.current_index = 0;
         self.search.active_query = query.clone();
-        
+
         // Get total rows for progress
         let total_rows = {
             let state = self.state.read();
             state.csv.as_ref().map(|c| c.total_rows).unwrap_or(0)
         };
-        
+
         // Initialize results
         {
             let mut results = self.search.results.write();
@@ -345,20 +345,20 @@ impl FastCsvApp {
             results.total_rows = total_rows;
             results.nav_limit_reached = false;
         }
-        
+
         // Clone what we need for the background thread
         let state = Arc::clone(&self.state);
         let results = Arc::clone(&self.search.results);
         let ctx = ctx.clone();
-        
+
         // Spawn background search thread
         thread::spawn(move || {
             const BATCH_SIZE: usize = 10000;
-            
+
             let mut nav_rows: Vec<usize> = Vec::new();
             let mut total_matches: usize = 0;
             let mut nav_limit_reached = false;
-            
+
             let state_guard = state.read();
             let csv = match &state_guard.csv {
                 Some(csv) => csv,
@@ -368,7 +368,7 @@ impl FastCsvApp {
                     return;
                 }
             };
-            
+
             for row_idx in 0..csv.total_rows {
                 // Check for cancellation
                 if cancel_flag.load(Ordering::Relaxed) {
@@ -377,7 +377,7 @@ impl FastCsvApp {
                     ctx.request_repaint();
                     return;
                 }
-                
+
                 // Parse and search the row
                 if let Some(fields) = csv.parse_row(row_idx) {
                     let mut row_has_match = false;
@@ -387,7 +387,7 @@ impl FastCsvApp {
                             row_has_match = true;
                         }
                     }
-                    
+
                     // Store row for navigation (limited)
                     if row_has_match && nav_rows.len() < MAX_NAV_ROWS {
                         nav_rows.push(row_idx);
@@ -395,7 +395,7 @@ impl FastCsvApp {
                         nav_limit_reached = true;
                     }
                 }
-                
+
                 // Update progress every BATCH_SIZE rows
                 if (row_idx + 1) % BATCH_SIZE == 0 {
                     let mut results = results.write();
@@ -407,7 +407,7 @@ impl FastCsvApp {
                     ctx.request_repaint();
                 }
             }
-            
+
             // Final update
             let mut results = results.write();
             results.navigation_rows = nav_rows;
@@ -463,12 +463,12 @@ impl FastCsvApp {
 
         ui.horizontal(|ui| {
             ui.label("🔍");
-            
+
             // Search input field
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.search.query)
                     .hint_text("Search all columns...")
-                    .desired_width(250.0)
+                    .desired_width(250.0),
             );
 
             // Execute search on Enter
@@ -478,26 +478,33 @@ impl FastCsvApp {
 
             // Search button (disabled during search)
             let is_searching = status == SearchStatus::Searching;
-            if ui.add_enabled(!is_searching, egui::Button::new("Search")).clicked() {
+            if ui
+                .add_enabled(!is_searching, egui::Button::new("Search"))
+                .clicked()
+            {
                 self.execute_search(ctx);
             }
 
             // Cancel button during search
-            if is_searching {
-                if ui.button("Cancel").clicked() {
-                    self.search.cancel_flag.store(true, Ordering::SeqCst);
-                }
+            if is_searching && ui.button("Cancel").clicked() {
+                self.search.cancel_flag.store(true, Ordering::SeqCst);
             }
 
             ui.separator();
 
             // Navigation buttons (navigate through rows with matches)
             let has_nav_rows = nav_row_count > 0;
-            
-            if ui.add_enabled(has_nav_rows && !is_searching, egui::Button::new("◀")).clicked() {
+
+            if ui
+                .add_enabled(has_nav_rows && !is_searching, egui::Button::new("◀"))
+                .clicked()
+            {
                 self.prev_match();
             }
-            if ui.add_enabled(has_nav_rows && !is_searching, egui::Button::new("▶")).clicked() {
+            if ui
+                .add_enabled(has_nav_rows && !is_searching, egui::Button::new("▶"))
+                .clicked()
+            {
                 self.next_match();
             }
 
@@ -523,10 +530,7 @@ impl FastCsvApp {
                             self.search.current_index = 0;
                         }
                         // Show total matches and navigation position
-                        ui.label(format!(
-                            "{} matches",
-                            format_number(total_matches)
-                        ));
+                        ui.label(format!("{} matches", format_number(total_matches)));
                         if has_nav_rows {
                             ui.label(format!(
                                 "(row {} of {}{})",
@@ -616,8 +620,8 @@ impl FastCsvApp {
                 // NOTE: We do NOT clone any large data structures - highlighting is done on-the-fly
                 let (search_query, current_nav_row) = {
                     let results = self.search.results.read();
-                    let nav_row = if !results.navigation_rows.is_empty() 
-                        && self.search.current_index < results.navigation_rows.len() 
+                    let nav_row = if !results.navigation_rows.is_empty()
+                        && self.search.current_index < results.navigation_rows.len()
                     {
                         Some(results.navigation_rows[self.search.current_index])
                     } else {
@@ -650,7 +654,7 @@ impl FastCsvApp {
                                     vec![]
                                 };
                                 drop(state);
-                                
+
                                 // Cache for next render
                                 self.row_cache.insert(row_idx, fields.clone());
                                 fields
@@ -664,7 +668,7 @@ impl FastCsvApp {
                             for field in fields.iter() {
                                 row.col(|ui| {
                                     // Check if this cell matches the search query
-                                    let is_match = !search_query.is_empty() 
+                                    let is_match = !search_query.is_empty()
                                         && field.to_lowercase().contains(&search_query);
 
                                     if is_match && is_current_nav_row {
@@ -682,7 +686,7 @@ impl FastCsvApp {
                                     }
                                 });
                             }
-                            
+
                             // Fill remaining columns if row has fewer fields than headers
                             for _ in fields.len()..num_columns {
                                 row.col(|ui| {
@@ -706,33 +710,31 @@ impl FastCsvApp {
     fn render_status_bar(&self, ui: &mut egui::Ui) {
         let state = self.state.read();
 
-        ui.horizontal(|ui| {
-            match state.load_state {
-                LoadState::Empty => {
-                    ui.label("No file loaded");
+        ui.horizontal(|ui| match state.load_state {
+            LoadState::Empty => {
+                ui.label("No file loaded");
+            }
+            LoadState::Indexing => {
+                let rows = state.rows_indexed.load(Ordering::Relaxed);
+                ui.spinner();
+                ui.label(format!("Indexing... {} rows", format_number(rows)));
+            }
+            LoadState::Ready => {
+                if let Some(csv) = &state.csv {
+                    ui.label(format!("Rows: {}", format_number(csv.total_rows)));
+                    ui.separator();
+                    ui.label(format!("Columns: {}", csv.headers.len()));
+                    ui.separator();
+                    ui.label(format!("Size: {}", format_file_size(csv.file_size)));
+                    ui.separator();
+                    ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
                 }
-                LoadState::Indexing => {
-                    let rows = state.rows_indexed.load(Ordering::Relaxed);
-                    ui.spinner();
-                    ui.label(format!("Indexing... {} rows", format_number(rows)));
-                }
-                LoadState::Ready => {
-                    if let Some(csv) = &state.csv {
-                        ui.label(format!("Rows: {}", format_number(csv.total_rows)));
-                        ui.separator();
-                        ui.label(format!("Columns: {}", csv.headers.len()));
-                        ui.separator();
-                        ui.label(format!("Size: {}", format_file_size(csv.file_size)));
-                        ui.separator();
-                        ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
-                    }
-                }
-                LoadState::Error => {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        state.error_message.as_deref().unwrap_or("Unknown error"),
-                    );
-                }
+            }
+            LoadState::Error => {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    state.error_message.as_deref().unwrap_or("Unknown error"),
+                );
             }
         });
     }
@@ -796,11 +798,17 @@ impl eframe::App for FastCsvApp {
                         self.search.visible = true;
                     }
                     let has_nav_rows = !self.search.results.read().navigation_rows.is_empty();
-                    if ui.add_enabled(has_nav_rows, egui::Button::new("Find Next (F3)")).clicked() {
+                    if ui
+                        .add_enabled(has_nav_rows, egui::Button::new("Find Next (F3)"))
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.next_match();
                     }
-                    if ui.add_enabled(has_nav_rows, egui::Button::new("Find Previous (⇧F3)")).clicked() {
+                    if ui
+                        .add_enabled(has_nav_rows, egui::Button::new("Find Previous (⇧F3)"))
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.prev_match();
                     }
@@ -837,7 +845,7 @@ impl eframe::App for FastCsvApp {
                 LoadState::Empty => {
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
-                            ui.heading("FastCSV");
+                            ui.heading("QuickCSV");
                             ui.add_space(20.0);
                             if ui.button("📂 Open CSV File").clicked() {
                                 self.open_file(ctx);
@@ -854,7 +862,10 @@ impl eframe::App for FastCsvApp {
                             ui.add_space(10.0);
                             let state = self.state.read();
                             let rows = state.rows_indexed.load(Ordering::Relaxed);
-                            ui.label(format!("Indexing file... {} rows found", format_number(rows)));
+                            ui.label(format!(
+                                "Indexing file... {} rows found",
+                                format_number(rows)
+                            ));
                         });
                     });
                     // Request continuous repaint during indexing
@@ -869,7 +880,10 @@ impl eframe::App for FastCsvApp {
                             let state = self.state.read();
                             ui.colored_label(
                                 egui::Color32::RED,
-                                format!("Error: {}", state.error_message.as_deref().unwrap_or("Unknown")),
+                                format!(
+                                    "Error: {}",
+                                    state.error_message.as_deref().unwrap_or("Unknown")
+                                ),
                             );
                             ui.add_space(20.0);
                             if ui.button("Try Again").clicked() {
@@ -895,10 +909,15 @@ impl eframe::App for FastCsvApp {
 }
 
 /// Load and index a CSV file in the background
-fn load_and_index_csv(path: &PathBuf, state: &Arc<RwLock<SharedState>>) -> Result<MappedCsv, String> {
+fn load_and_index_csv(
+    path: &PathBuf,
+    state: &Arc<RwLock<SharedState>>,
+) -> Result<MappedCsv, String> {
     // Open and memory-map the file
-    let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
-    let metadata = file.metadata().map_err(|e| format!("Failed to read metadata: {}", e))?;
+    let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("Failed to read metadata: {e}"))?;
     let file_size = metadata.len();
 
     if file_size == 0 {
@@ -906,7 +925,8 @@ fn load_and_index_csv(path: &PathBuf, state: &Arc<RwLock<SharedState>>) -> Resul
     }
 
     // Safety: We're only reading the file, and it won't be modified while we have it mapped
-    let mmap = unsafe { Mmap::map(&file) }.map_err(|e| format!("Failed to memory-map file: {}", e))?;
+    let mmap =
+        unsafe { Mmap::map(&file) }.map_err(|e| format!("Failed to memory-map file: {e}"))?;
 
     // Index row offsets by scanning for newlines
     let mut row_offsets = Vec::with_capacity((file_size / 50) as usize); // Estimate ~50 bytes per row
@@ -917,7 +937,7 @@ fn load_and_index_csv(path: &PathBuf, state: &Arc<RwLock<SharedState>>) -> Resul
 
     let mut offset = 0;
     let bytes = &mmap[..];
-    
+
     while offset < bytes.len() {
         // Check for cancellation
         if cancel_flag.load(Ordering::Relaxed) {
@@ -930,7 +950,7 @@ fn load_and_index_csv(path: &PathBuf, state: &Arc<RwLock<SharedState>>) -> Resul
             if offset < bytes.len() {
                 row_offsets.push(offset);
             }
-            
+
             // Update progress every 10000 rows
             if row_offsets.len() % 10000 == 0 {
                 rows_indexed.store(row_offsets.len(), Ordering::Relaxed);
@@ -950,11 +970,11 @@ fn load_and_index_csv(path: &PathBuf, state: &Arc<RwLock<SharedState>>) -> Resul
     // Parse headers from first row
     let header_end = row_offsets.get(1).copied().unwrap_or(bytes.len());
     let header_bytes = &bytes[0..header_end];
-    
+
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .from_reader(header_bytes);
-    
+
     let headers: Vec<String> = reader
         .records()
         .next()
@@ -998,20 +1018,19 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title("FastCSV")
+            .with_title("QuickCSV")
             .with_drag_and_drop(true),
         ..Default::default()
     };
 
     eframe::run_native(
-        "FastCSV",
+        "QuickCSV",
         options,
         Box::new(|cc| {
             // Follow system theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            
+
             Ok(Box::new(FastCsvApp::default()))
         }),
     )
 }
-
