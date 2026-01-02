@@ -7,7 +7,7 @@ import string
 import os
 
 OUTPUT_FILE = "large_test.csv"
-TARGET_SIZE_MB = 1000
+TARGET_SIZE_MB = 2000
 TARGET_SIZE_BYTES = TARGET_SIZE_MB * 1024 * 1024
 
 # Column definitions

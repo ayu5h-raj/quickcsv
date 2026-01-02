@@ -37,12 +37,10 @@ enum LoadState {
 struct MappedCsv {
     /// Memory-mapped file data
     mmap: Mmap,
-    /// Byte offset of each row (including header)
-    row_offsets: Vec<usize>,
+    /// Byte offset of each row (including header) - shared for progressive loading
+    row_offsets: Arc<RwLock<Vec<usize>>>,
     /// Column headers
     headers: Vec<String>,
-    /// Total number of data rows (excluding header)
-    total_rows: usize,
     /// File path
     path: PathBuf,
     /// File size in bytes
@@ -50,20 +48,29 @@ struct MappedCsv {
 }
 
 impl MappedCsv {
+    /// Get current number of indexed rows (excluding header)
+    fn indexed_row_count(&self) -> usize {
+        let offsets = self.row_offsets.read();
+        if offsets.len() > 1 {
+            offsets.len() - 1 // Subtract 1 for header
+        } else {
+            0
+        }
+    }
+
     /// Get a row's data as a slice of the memory-mapped region
     fn get_row_bytes(&self, row_index: usize) -> Option<&[u8]> {
-        if row_index >= self.total_rows {
-            return None;
-        }
+        let offsets = self.row_offsets.read();
+
         // Row 0 is the header, so data rows start at index 1
         let data_row_offset_index = row_index + 1;
-        if data_row_offset_index >= self.row_offsets.len() {
+        if data_row_offset_index >= offsets.len() {
             return None;
         }
 
-        let start = self.row_offsets[data_row_offset_index];
-        let end = if data_row_offset_index + 1 < self.row_offsets.len() {
-            self.row_offsets[data_row_offset_index + 1]
+        let start = offsets[data_row_offset_index];
+        let end = if data_row_offset_index + 1 < offsets.len() {
+            offsets[data_row_offset_index + 1]
         } else {
             self.mmap.len()
         };
@@ -98,6 +105,8 @@ struct SharedState {
     rows_indexed: AtomicUsize,
     /// Flag to cancel ongoing indexing
     cancel_indexing: AtomicBool,
+    /// Flag to indicate indexing is complete
+    indexing_complete: AtomicBool,
 }
 
 impl Default for SharedState {
@@ -108,6 +117,7 @@ impl Default for SharedState {
             error_message: None,
             rows_indexed: AtomicUsize::new(0),
             cancel_indexing: AtomicBool::new(false),
+            indexing_complete: AtomicBool::new(false),
         }
     }
 }
@@ -204,6 +214,44 @@ impl Default for SearchState {
     }
 }
 
+/// Sort direction for column sorting
+#[derive(Clone, Copy, PartialEq, Default)]
+enum SortDirection {
+    #[default]
+    None,
+    Ascending,
+    Descending,
+}
+
+/// Column sort state
+struct SortState {
+    /// Currently sorted column index (None if not sorted)
+    column: Option<usize>,
+    /// Sort direction
+    direction: SortDirection,
+    /// Sorted row indices (maps display index -> actual row index)
+    sorted_indices: Arc<RwLock<Vec<usize>>>,
+    /// Whether sorting is in progress
+    is_sorting: Arc<AtomicBool>,
+    /// Sorting progress (0-100)
+    progress: Arc<AtomicUsize>,
+    /// Cancel flag for sorting
+    cancel_flag: Arc<AtomicBool>,
+}
+
+impl Default for SortState {
+    fn default() -> Self {
+        Self {
+            column: None,
+            direction: SortDirection::None,
+            sorted_indices: Arc::new(RwLock::new(Vec::new())),
+            is_sorting: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(AtomicUsize::new(0)),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
 /// JSON viewer popup state
 #[derive(Default)]
 struct JsonViewerState {
@@ -241,6 +289,10 @@ struct FastCsvApp {
     search: SearchState,
     /// JSON viewer popup state
     json_viewer: JsonViewerState,
+    /// Dark mode enabled (true = dark, false = light)
+    dark_mode: bool,
+    /// Column sort state
+    sort_state: SortState,
 }
 
 impl Default for FastCsvApp {
@@ -254,6 +306,8 @@ impl Default for FastCsvApp {
             last_visible_range: (0, 0),
             search: SearchState::default(),
             json_viewer: JsonViewerState::default(),
+            dark_mode: true, // Default to dark mode
+            sort_state: SortState::default(),
         }
     }
 }
@@ -285,6 +339,8 @@ impl FastCsvApp {
         self.column_widths.clear();
         self.row_cache.clear();
         self.last_visible_range = (0, 0);
+        // Reset sort state
+        self.sort_state = SortState::default();
         // Cancel any ongoing search and clear results
         self.search.cancel_flag.store(true, Ordering::SeqCst);
         self.search.current_index = 0;
@@ -306,31 +362,180 @@ impl FastCsvApp {
             state.error_message = None;
             state.rows_indexed.store(0, Ordering::Relaxed);
             state.cancel_indexing.store(false, Ordering::Relaxed);
+            state.indexing_complete.store(false, Ordering::Relaxed);
         }
 
         let state = Arc::clone(&self.state);
         let path_clone = path.clone();
 
-        // Spawn background thread for indexing
+        // Start progressive loading - shows data immediately while indexing continues
         thread::spawn(move || {
-            let result = load_and_index_csv(&path_clone, &state);
+            let result = init_csv_progressive(&path_clone, &state, &ctx);
 
-            let mut state_guard = state.write();
-            match result {
-                Ok(mapped_csv) => {
-                    state_guard.csv = Some(mapped_csv);
-                    state_guard.load_state = LoadState::Ready;
+            if let Err(e) = result {
+                let mut state_guard = state.write();
+                state_guard.load_state = LoadState::Error;
+                state_guard.error_message = Some(e);
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Sort data by column
+    ///
+    /// Clicking the same column cycles through: None -> Ascending -> Descending -> None
+    /// Clicking a different column starts with Ascending
+    fn sort_by_column(&mut self, col_idx: usize, ctx: &egui::Context) {
+        // If already sorting, ignore click
+        if self.sort_state.is_sorting.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Determine new sort direction
+        let new_direction = if self.sort_state.column == Some(col_idx) {
+            // Same column - cycle through directions
+            match self.sort_state.direction {
+                SortDirection::None => SortDirection::Ascending,
+                SortDirection::Ascending => SortDirection::Descending,
+                SortDirection::Descending => SortDirection::None,
+            }
+        } else {
+            // Different column - start with ascending
+            SortDirection::Ascending
+        };
+
+        // If direction is None, clear sorting
+        if new_direction == SortDirection::None {
+            self.sort_state.cancel_flag.store(true, Ordering::SeqCst);
+            self.sort_state = SortState::default();
+            self.row_cache.clear();
+            return;
+        }
+
+        // Cancel any previous sort
+        self.sort_state.cancel_flag.store(true, Ordering::SeqCst);
+
+        // Update sort state
+        self.sort_state.column = Some(col_idx);
+        self.sort_state.direction = new_direction;
+        self.sort_state.is_sorting.store(true, Ordering::SeqCst);
+        self.sort_state.progress.store(0, Ordering::SeqCst);
+        self.sort_state.cancel_flag = Arc::new(AtomicBool::new(false));
+
+        // Clear sorted indices and row cache
+        {
+            let mut indices = self.sort_state.sorted_indices.write();
+            indices.clear();
+        }
+        self.row_cache.clear();
+
+        // Clone what we need for the background thread
+        let state = Arc::clone(&self.state);
+        let sorted_indices = Arc::clone(&self.sort_state.sorted_indices);
+        let is_sorting = Arc::clone(&self.sort_state.is_sorting);
+        let progress = Arc::clone(&self.sort_state.progress);
+        let cancel_flag = Arc::clone(&self.sort_state.cancel_flag);
+        let ctx = ctx.clone();
+
+        // Spawn background sorting thread
+        thread::spawn(move || {
+            let state_guard = state.read();
+            let csv = match &state_guard.csv {
+                Some(csv) => csv,
+                None => {
+                    is_sorting.store(false, Ordering::SeqCst);
+                    return;
                 }
-                Err(e) => {
-                    state_guard.load_state = LoadState::Error;
-                    state_guard.error_message = Some(e);
+            };
+
+            let total_rows = csv.indexed_row_count();
+
+            // For very large files, limit sorting for performance
+            const MAX_SORT_ROWS: usize = 100_000;
+            let rows_to_sort = total_rows.min(MAX_SORT_ROWS);
+
+            // Collect row data for sorting (with progress updates)
+            let mut row_data: Vec<(usize, String)> = Vec::with_capacity(rows_to_sort);
+            for row_idx in 0..rows_to_sort {
+                // Check for cancellation
+                if cancel_flag.load(Ordering::Relaxed) {
+                    is_sorting.store(false, Ordering::SeqCst);
+                    return;
+                }
+
+                if let Some(fields) = csv.parse_row(row_idx) {
+                    let value = fields.get(col_idx).cloned().unwrap_or_default();
+                    row_data.push((row_idx, value));
+                }
+
+                // Update progress (collection phase = 0-50%)
+                if row_idx % 5000 == 0 {
+                    let pct = (row_idx * 50) / rows_to_sort;
+                    progress.store(pct, Ordering::Relaxed);
+                    ctx.request_repaint();
                 }
             }
-            drop(state_guard);
 
-            // Request UI repaint
+            progress.store(50, Ordering::Relaxed);
+            ctx.request_repaint();
+
+            // Sort by column value
+            match new_direction {
+                SortDirection::Ascending => {
+                    row_data.sort_by(|a, b| {
+                        // Try numeric comparison first
+                        match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                            (Ok(a_num), Ok(b_num)) => a_num
+                                .partial_cmp(&b_num)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                            _ => a.1.to_lowercase().cmp(&b.1.to_lowercase()),
+                        }
+                    });
+                }
+                SortDirection::Descending => {
+                    row_data.sort_by(|a, b| {
+                        // Try numeric comparison first
+                        match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                            (Ok(a_num), Ok(b_num)) => b_num
+                                .partial_cmp(&a_num)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                            _ => b.1.to_lowercase().cmp(&a.1.to_lowercase()),
+                        }
+                    });
+                }
+                SortDirection::None => {}
+            }
+
+            progress.store(90, Ordering::Relaxed);
+            ctx.request_repaint();
+
+            // Store sorted indices
+            {
+                let mut indices = sorted_indices.write();
+                *indices = row_data.into_iter().map(|(idx, _)| idx).collect();
+            }
+
+            progress.store(100, Ordering::Relaxed);
+            is_sorting.store(false, Ordering::SeqCst);
             ctx.request_repaint();
         });
+    }
+
+    /// Get the actual row index considering sorting
+    fn get_actual_row_index(&self, display_index: usize) -> usize {
+        if self.sort_state.direction == SortDirection::None {
+            return display_index;
+        }
+
+        let indices = self.sort_state.sorted_indices.read();
+        if indices.is_empty() {
+            display_index
+        } else if display_index < indices.len() {
+            indices[display_index]
+        } else {
+            // For rows beyond sorted range, return original index
+            display_index
+        }
     }
 
     /// Execute search across all columns in a background thread
@@ -380,7 +585,11 @@ impl FastCsvApp {
         // Get total rows for progress
         let total_rows = {
             let state = self.state.read();
-            state.csv.as_ref().map(|c| c.total_rows).unwrap_or(0)
+            state
+                .csv
+                .as_ref()
+                .map(|c| c.indexed_row_count())
+                .unwrap_or(0)
         };
 
         // Initialize results
@@ -417,7 +626,7 @@ impl FastCsvApp {
                 }
             };
 
-            for row_idx in 0..csv.total_rows {
+            for row_idx in 0..csv.indexed_row_count() {
                 // Check for cancellation
                 if cancel_flag.load(Ordering::Relaxed) {
                     let mut results = results.write();
@@ -460,7 +669,7 @@ impl FastCsvApp {
             let mut results = results.write();
             results.navigation_rows = nav_rows;
             results.total_match_count = total_matches;
-            results.rows_searched = csv.total_rows;
+            results.rows_searched = csv.indexed_row_count();
             results.status = SearchStatus::Complete;
             results.nav_limit_reached = nav_limit_reached;
             drop(results);
@@ -675,10 +884,15 @@ impl FastCsvApp {
         use egui_extras::{Column, TableBuilder};
 
         // Extract data from state first, then drop the lock
-        let (headers, total_rows, num_columns) = {
+        let (headers, total_rows, num_columns, _is_indexing) = {
             let state = self.state.read();
             match &state.csv {
-                Some(csv) => (csv.headers.clone(), csv.total_rows, csv.headers.len()),
+                Some(csv) => (
+                    csv.headers.clone(),
+                    csv.indexed_row_count(),
+                    csv.headers.len(),
+                    !state.indexing_complete.load(Ordering::Relaxed),
+                ),
                 None => return,
             }
         };
@@ -729,38 +943,87 @@ impl FastCsvApp {
                     (self.search.active_query.clone(), nav_row)
                 };
 
+                // Track which column header was clicked for sorting
+                let mut clicked_column: Option<usize> = None;
+                let current_sort_col = self.sort_state.column;
+                let current_sort_dir = self.sort_state.direction;
+                let is_sorting = self.sort_state.is_sorting.load(Ordering::Relaxed);
+                let sort_progress = self.sort_state.progress.load(Ordering::Relaxed);
+
                 table
                     .header(ROW_HEIGHT, |mut header| {
-                        for col_name in &headers {
+                        for (col_idx, col_name) in headers.iter().enumerate() {
                             header.col(|ui| {
-                                ui.strong(col_name);
+                                // Create clickable header with sort indicator
+                                let sort_indicator = if current_sort_col == Some(col_idx) {
+                                    if is_sorting {
+                                        format!(" ({}%)", sort_progress)
+                                    } else {
+                                        match current_sort_dir {
+                                            SortDirection::Ascending => " (asc)".to_string(),
+                                            SortDirection::Descending => " (desc)".to_string(),
+                                            SortDirection::None => String::new(),
+                                        }
+                                    }
+                                } else {
+                                    String::new()
+                                };
+
+                                let header_text = format!("{}{}", col_name, sort_indicator);
+
+                                // Dim text if sorting in progress
+                                let text = if is_sorting && current_sort_col == Some(col_idx) {
+                                    egui::RichText::new(header_text)
+                                        .strong()
+                                        .color(Color32::from_rgb(100, 180, 255))
+                                } else {
+                                    egui::RichText::new(header_text).strong()
+                                };
+
+                                let response =
+                                    ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+
+                                // Only allow clicks when not sorting
+                                if response.clicked() && !is_sorting {
+                                    clicked_column = Some(col_idx);
+                                }
+
+                                // Show tooltip
+                                if is_sorting {
+                                    response.on_hover_text("Sorting in progress...");
+                                } else {
+                                    response.on_hover_text("Click to sort");
+                                }
                             });
                         }
                     })
                     .body(|body| {
                         body.rows(ROW_HEIGHT, total_rows, |mut row| {
-                            let row_idx = row.index();
+                            let display_idx = row.index();
 
-                            // Get or parse row data
-                            let fields = if let Some(cached) = self.row_cache.get(&row_idx) {
+                            // Map display index to actual row index (for sorting)
+                            let actual_row_idx = self.get_actual_row_index(display_idx);
+
+                            // Get or parse row data (cache by actual row index)
+                            let fields = if let Some(cached) = self.row_cache.get(&actual_row_idx) {
                                 cached.clone()
                             } else {
                                 // Parse from mmap
                                 let state = self.state.read();
                                 let fields = if let Some(csv) = &state.csv {
-                                    csv.parse_row(row_idx).unwrap_or_default()
+                                    csv.parse_row(actual_row_idx).unwrap_or_default()
                                 } else {
                                     vec![]
                                 };
                                 drop(state);
 
                                 // Cache for next render
-                                self.row_cache.insert(row_idx, fields.clone());
+                                self.row_cache.insert(actual_row_idx, fields.clone());
                                 fields
                             };
 
                             // Check if this is the current navigation row (for special highlighting)
-                            let is_current_nav_row = current_nav_row == Some(row_idx);
+                            let is_current_nav_row = current_nav_row == Some(actual_row_idx);
 
                             // Render each cell with ON-THE-FLY search highlighting
                             // This is O(visible_rows) per frame - no memory overhead!
@@ -807,25 +1070,34 @@ impl FastCsvApp {
                                         ui.add(egui::Label::new(field).sense(egui::Sense::click()))
                                     };
 
-                                    // Handle double-click to open JSON viewer
-                                    if response.double_clicked() && is_json {
+                                    // Handle double-click to open cell viewer (works for any cell)
+                                    if response.double_clicked() {
                                         // Get column name
                                         let col_name = headers
                                             .get(col_idx)
                                             .cloned()
                                             .unwrap_or_else(|| format!("Column {col_idx}"));
 
-                                        // Try to format the JSON
-                                        let formatted = format_json(field);
+                                        // Try to format as JSON if it looks like JSON
+                                        let formatted =
+                                            if is_json { format_json(field) } else { None };
 
                                         self.json_viewer.open = true;
                                         self.json_viewer.raw_content = field.clone();
                                         self.json_viewer.formatted_content =
                                             formatted.clone().unwrap_or_else(|| field.clone());
-                                        self.json_viewer.is_valid_json = formatted.is_some();
-                                        self.json_viewer.row = row_idx;
+                                        self.json_viewer.is_valid_json =
+                                            is_json && formatted.is_some();
+                                        self.json_viewer.row = actual_row_idx;
                                         self.json_viewer.col = col_idx;
                                         self.json_viewer.column_name = col_name;
+                                    }
+
+                                    // Show tooltip with full content on hover (for truncated cells)
+                                    // Only show if content is long enough to be truncated
+                                    // Note: on_hover_text consumes response, so this must be last
+                                    if field.len() > 50 {
+                                        response.on_hover_text(field);
                                     }
                                 });
                             }
@@ -838,6 +1110,11 @@ impl FastCsvApp {
                             }
                         });
                     });
+
+                // Handle column header click for sorting (after table is built)
+                if let Some(col_idx) = clicked_column {
+                    self.sort_by_column(col_idx, ui.ctx());
+                }
             }); // End of horizontal scroll area
 
         // Prune old cache entries (keep last 2000 rows in cache)
@@ -864,7 +1141,15 @@ impl FastCsvApp {
             }
             LoadState::Ready => {
                 if let Some(csv) = &state.csv {
-                    ui.label(format!("Rows: {}", format_number(csv.total_rows)));
+                    let row_count = csv.indexed_row_count();
+                    let is_still_indexing = !state.indexing_complete.load(Ordering::Relaxed);
+
+                    if is_still_indexing {
+                        ui.spinner();
+                        ui.label(format!("Rows: {}...", format_number(row_count)));
+                    } else {
+                        ui.label(format!("Rows: {}", format_number(row_count)));
+                    }
                     ui.separator();
                     ui.label(format!("Columns: {}", csv.headers.len()));
                     ui.separator();
@@ -903,7 +1188,14 @@ impl FastCsvApp {
 
         let mut should_close = false;
 
-        egui::Window::new("📄 JSON Viewer")
+        // Determine title based on content type
+        let title = if is_valid {
+            "📄 Cell Viewer (JSON)"
+        } else {
+            "📄 Cell Viewer"
+        };
+
+        egui::Window::new(title)
             .default_size([550.0, 450.0])
             .min_size([400.0, 300.0])
             .resizable(true)
@@ -912,7 +1204,7 @@ impl FastCsvApp {
             .show(ctx, |ui| {
                 ui.add_space(4.0);
 
-                // Header info bar with location and validation status
+                // Header info bar with location and content type
                 ui.horizontal(|ui| {
                     // Location info with icons
                     ui.label(egui::RichText::new("📍").size(14.0));
@@ -927,7 +1219,7 @@ impl FastCsvApp {
                             .strong(),
                     );
 
-                    // Right-aligned validation badge
+                    // Right-aligned content type badge (only show for JSON)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if is_valid {
                             egui::Frame::none()
@@ -936,23 +1228,18 @@ impl FastCsvApp {
                                 .inner_margin(egui::Margin::symmetric(8.0, 4.0))
                                 .show(ui, |ui| {
                                     ui.label(
-                                        egui::RichText::new("✓ Valid JSON")
+                                        egui::RichText::new("JSON")
                                             .color(Color32::from_rgb(120, 220, 120))
                                             .size(12.0),
                                     );
                                 });
                         } else {
-                            egui::Frame::none()
-                                .fill(Color32::from_rgb(80, 50, 30))
-                                .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new("⚠ Invalid JSON")
-                                            .color(Color32::from_rgb(255, 180, 100))
-                                            .size(12.0),
-                                    );
-                                });
+                            // Show character count for plain text
+                            ui.label(
+                                egui::RichText::new(format!("{} chars", raw.len()))
+                                    .color(Color32::from_rgb(150, 150, 150))
+                                    .size(12.0),
+                            );
                         }
                     });
                 });
@@ -1077,6 +1364,7 @@ impl eframe::App for FastCsvApp {
                     if ui.button("Find... (⌘F)").clicked() {
                         ui.close_menu();
                         self.search.visible = true;
+                        self.search.focus_input = true;
                     }
                     let has_nav_rows = !self.search.results.read().navigation_rows.is_empty();
                     if ui
@@ -1092,6 +1380,28 @@ impl eframe::App for FastCsvApp {
                     {
                         ui.close_menu();
                         self.prev_match();
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    let theme_label = if self.dark_mode {
+                        "☀ Light Mode"
+                    } else {
+                        "🌙 Dark Mode"
+                    };
+                    if ui.button(theme_label).clicked() {
+                        self.dark_mode = !self.dark_mode;
+                        if self.dark_mode {
+                            ctx.set_visuals(egui::Visuals::dark());
+                        } else {
+                            // Custom light mode with better striped rows
+                            let mut light = egui::Visuals::light();
+                            // Make stripe color more visible (light grey)
+                            light.faint_bg_color = Color32::from_rgb(235, 235, 240);
+                            // Slightly darker widget background
+                            light.widgets.noninteractive.bg_fill = Color32::from_rgb(245, 245, 248);
+                            ctx.set_visuals(light);
+                        }
+                        ui.close_menu();
                     }
                 });
             });
@@ -1193,10 +1503,12 @@ impl eframe::App for FastCsvApp {
 }
 
 /// Load and index a CSV file in the background
-fn load_and_index_csv(
+/// Initialize CSV file for progressive loading - parses headers and starts indexing
+fn init_csv_progressive(
     path: &PathBuf,
     state: &Arc<RwLock<SharedState>>,
-) -> Result<MappedCsv, String> {
+    ctx: &egui::Context,
+) -> Result<(), String> {
     // Open and memory-map the file
     let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
     let metadata = file
@@ -1212,49 +1524,13 @@ fn load_and_index_csv(
     let mmap =
         unsafe { Mmap::map(&file) }.map_err(|e| format!("Failed to memory-map file: {e}"))?;
 
-    // Index row offsets by scanning for newlines
-    let mut row_offsets = Vec::with_capacity((file_size / 50) as usize); // Estimate ~50 bytes per row
-    row_offsets.push(0); // First row starts at byte 0
-
-    let cancel_flag = &state.read().cancel_indexing;
-    let rows_indexed = &state.read().rows_indexed;
-
-    let mut offset = 0;
     let bytes = &mmap[..];
 
-    while offset < bytes.len() {
-        // Check for cancellation
-        if cancel_flag.load(Ordering::Relaxed) {
-            return Err("Indexing cancelled".to_string());
-        }
-
-        // Find next newline
-        if let Some(pos) = memchr::memchr(b'\n', &bytes[offset..]) {
-            offset += pos + 1;
-            if offset < bytes.len() {
-                row_offsets.push(offset);
-            }
-
-            // Update progress every 10000 rows
-            if row_offsets.len() % 10000 == 0 {
-                rows_indexed.store(row_offsets.len(), Ordering::Relaxed);
-            }
-        } else {
-            break;
-        }
-    }
-
-    // Final row count update
-    rows_indexed.store(row_offsets.len(), Ordering::Relaxed);
-
-    if row_offsets.len() < 2 {
-        return Err("File has no data rows".to_string());
-    }
+    // Find the first newline to get headers
+    let first_newline = memchr::memchr(b'\n', bytes).unwrap_or(bytes.len());
 
     // Parse headers from first row
-    let header_end = row_offsets.get(1).copied().unwrap_or(bytes.len());
-    let header_bytes = &bytes[0..header_end];
-
+    let header_bytes = &bytes[0..first_newline];
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .from_reader(header_bytes);
@@ -1266,16 +1542,127 @@ fn load_and_index_csv(
         .map(|record| record.iter().map(|s| s.to_string()).collect())
         .unwrap_or_else(|| vec!["Column".to_string()]);
 
-    let total_rows = row_offsets.len() - 1; // Subtract 1 for header
+    // Create shared row_offsets with just the header and first data row
+    let row_offsets = Arc::new(RwLock::new(vec![0, first_newline + 1]));
 
-    Ok(MappedCsv {
+    // Create MappedCsv immediately so UI can show data
+    let mapped_csv = MappedCsv {
         mmap,
-        row_offsets,
+        row_offsets: Arc::clone(&row_offsets),
         headers,
-        total_rows,
         path: path.clone(),
         file_size,
-    })
+    };
+
+    // Update state to Ready immediately so UI shows data
+    {
+        let mut state_guard = state.write();
+        state_guard.csv = Some(mapped_csv);
+        state_guard.load_state = LoadState::Ready;
+        state_guard.rows_indexed.store(1, Ordering::Relaxed);
+        state_guard
+            .indexing_complete
+            .store(false, Ordering::Relaxed);
+    }
+
+    // Request UI repaint to show the data immediately
+    ctx.request_repaint();
+
+    // Continue indexing in background - we need to re-map the file in the background thread
+    // because the mmap in MappedCsv is already used by the UI
+    let state_clone = Arc::clone(state);
+    let ctx_clone = ctx.clone();
+    let path_clone = path.clone();
+    let start_offset = first_newline + 1;
+
+    thread::spawn(move || {
+        // Re-open and map the file for indexing (UI uses its own map)
+        let file = match File::open(&path_clone) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+
+        let mmap = match unsafe { Mmap::map(&file) } {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        let bytes = &mmap[..];
+
+        // Get references we need from state
+        let (row_offsets_ref, cancel_flag, _rows_indexed, _indexing_complete) = {
+            let state_guard = state_clone.read();
+            let csv = match &state_guard.csv {
+                Some(csv) => csv,
+                None => return,
+            };
+            (
+                Arc::clone(&csv.row_offsets),
+                state_guard.cancel_indexing.load(Ordering::Relaxed),
+                Arc::new(AtomicUsize::new(0)), // We'll update state directly
+                Arc::new(AtomicBool::new(false)),
+            )
+        };
+
+        let _ = cancel_flag; // silence warning
+
+        let mut offset = start_offset;
+        let mut batch_offsets = Vec::with_capacity(10000);
+
+        while offset < bytes.len() {
+            // Check for cancellation
+            {
+                let state_guard = state_clone.read();
+                if state_guard.cancel_indexing.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+
+            // Find next newline
+            if let Some(pos) = memchr::memchr(b'\n', &bytes[offset..]) {
+                offset += pos + 1;
+                if offset < bytes.len() {
+                    batch_offsets.push(offset);
+                }
+
+                // Batch update every 10000 rows for better performance
+                if batch_offsets.len() >= 10000 {
+                    {
+                        let mut offsets = row_offsets_ref.write();
+                        offsets.extend(batch_offsets.drain(..));
+                        let count = offsets.len();
+                        drop(offsets);
+
+                        let state_guard = state_clone.read();
+                        state_guard.rows_indexed.store(count, Ordering::Relaxed);
+                    }
+                    ctx_clone.request_repaint();
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Final batch
+        if !batch_offsets.is_empty() {
+            let mut offsets = row_offsets_ref.write();
+            offsets.extend(batch_offsets);
+            let count = offsets.len();
+            drop(offsets);
+
+            let state_guard = state_clone.read();
+            state_guard.rows_indexed.store(count, Ordering::Relaxed);
+        }
+
+        // Mark indexing as complete
+        {
+            let state_guard = state_clone.read();
+            state_guard.indexing_complete.store(true, Ordering::SeqCst);
+        }
+        ctx_clone.request_repaint();
+    });
+
+    Ok(())
 }
 
 /// Format a number with thousand separators
