@@ -37,12 +37,10 @@ enum LoadState {
 struct MappedCsv {
     /// Memory-mapped file data
     mmap: Mmap,
-    /// Byte offset of each row (including header)
-    row_offsets: Vec<usize>,
+    /// Byte offset of each row (including header) - shared for progressive loading
+    row_offsets: Arc<RwLock<Vec<usize>>>,
     /// Column headers
     headers: Vec<String>,
-    /// Total number of data rows (excluding header)
-    total_rows: usize,
     /// File path
     path: PathBuf,
     /// File size in bytes
@@ -50,20 +48,29 @@ struct MappedCsv {
 }
 
 impl MappedCsv {
+    /// Get current number of indexed rows (excluding header)
+    fn indexed_row_count(&self) -> usize {
+        let offsets = self.row_offsets.read();
+        if offsets.len() > 1 {
+            offsets.len() - 1 // Subtract 1 for header
+        } else {
+            0
+        }
+    }
+
     /// Get a row's data as a slice of the memory-mapped region
     fn get_row_bytes(&self, row_index: usize) -> Option<&[u8]> {
-        if row_index >= self.total_rows {
-            return None;
-        }
+        let offsets = self.row_offsets.read();
+
         // Row 0 is the header, so data rows start at index 1
         let data_row_offset_index = row_index + 1;
-        if data_row_offset_index >= self.row_offsets.len() {
+        if data_row_offset_index >= offsets.len() {
             return None;
         }
 
-        let start = self.row_offsets[data_row_offset_index];
-        let end = if data_row_offset_index + 1 < self.row_offsets.len() {
-            self.row_offsets[data_row_offset_index + 1]
+        let start = offsets[data_row_offset_index];
+        let end = if data_row_offset_index + 1 < offsets.len() {
+            offsets[data_row_offset_index + 1]
         } else {
             self.mmap.len()
         };
@@ -98,6 +105,8 @@ struct SharedState {
     rows_indexed: AtomicUsize,
     /// Flag to cancel ongoing indexing
     cancel_indexing: AtomicBool,
+    /// Flag to indicate indexing is complete
+    indexing_complete: AtomicBool,
 }
 
 impl Default for SharedState {
@@ -108,6 +117,7 @@ impl Default for SharedState {
             error_message: None,
             rows_indexed: AtomicUsize::new(0),
             cancel_indexing: AtomicBool::new(false),
+            indexing_complete: AtomicBool::new(false),
         }
     }
 }
@@ -352,30 +362,22 @@ impl FastCsvApp {
             state.error_message = None;
             state.rows_indexed.store(0, Ordering::Relaxed);
             state.cancel_indexing.store(false, Ordering::Relaxed);
+            state.indexing_complete.store(false, Ordering::Relaxed);
         }
 
         let state = Arc::clone(&self.state);
         let path_clone = path.clone();
 
-        // Spawn background thread for indexing
+        // Start progressive loading - shows data immediately while indexing continues
         thread::spawn(move || {
-            let result = load_and_index_csv(&path_clone, &state);
+            let result = init_csv_progressive(&path_clone, &state, &ctx);
 
+            if let Err(e) = result {
             let mut state_guard = state.write();
-            match result {
-                Ok(mapped_csv) => {
-                    state_guard.csv = Some(mapped_csv);
-                    state_guard.load_state = LoadState::Ready;
-                }
-                Err(e) => {
                     state_guard.load_state = LoadState::Error;
                     state_guard.error_message = Some(e);
-                }
+                ctx.request_repaint();
             }
-            drop(state_guard);
-
-            // Request UI repaint
-            ctx.request_repaint();
         });
     }
 
@@ -446,7 +448,7 @@ impl FastCsvApp {
                 }
             };
 
-            let total_rows = csv.total_rows;
+            let total_rows = csv.indexed_row_count();
 
             // For very large files, limit sorting for performance
             const MAX_SORT_ROWS: usize = 100_000;
@@ -470,7 +472,7 @@ impl FastCsvApp {
                 if row_idx % 5000 == 0 {
                     let pct = (row_idx * 50) / rows_to_sort;
                     progress.store(pct, Ordering::Relaxed);
-                    ctx.request_repaint();
+            ctx.request_repaint();
                 }
             }
 
@@ -583,7 +585,7 @@ impl FastCsvApp {
         // Get total rows for progress
         let total_rows = {
             let state = self.state.read();
-            state.csv.as_ref().map(|c| c.total_rows).unwrap_or(0)
+            state.csv.as_ref().map(|c| c.indexed_row_count()).unwrap_or(0)
         };
 
         // Initialize results
@@ -620,7 +622,7 @@ impl FastCsvApp {
                 }
             };
 
-            for row_idx in 0..csv.total_rows {
+            for row_idx in 0..csv.indexed_row_count() {
                 // Check for cancellation
                 if cancel_flag.load(Ordering::Relaxed) {
                     let mut results = results.write();
@@ -663,7 +665,7 @@ impl FastCsvApp {
             let mut results = results.write();
             results.navigation_rows = nav_rows;
             results.total_match_count = total_matches;
-            results.rows_searched = csv.total_rows;
+            results.rows_searched = csv.indexed_row_count();
             results.status = SearchStatus::Complete;
             results.nav_limit_reached = nav_limit_reached;
             drop(results);
@@ -878,10 +880,15 @@ impl FastCsvApp {
         use egui_extras::{Column, TableBuilder};
 
         // Extract data from state first, then drop the lock
-        let (headers, total_rows, num_columns) = {
+        let (headers, total_rows, num_columns, _is_indexing) = {
             let state = self.state.read();
             match &state.csv {
-                Some(csv) => (csv.headers.clone(), csv.total_rows, csv.headers.len()),
+                Some(csv) => (
+                    csv.headers.clone(),
+                    csv.indexed_row_count(),
+                    csv.headers.len(),
+                    !state.indexing_complete.load(Ordering::Relaxed),
+                ),
                 None => return,
             }
         };
@@ -1005,7 +1012,7 @@ impl FastCsvApp {
                                     vec![]
                                 };
                                 drop(state);
-
+                                
                                 // Cache for next render
                                 self.row_cache.insert(actual_row_idx, fields.clone());
                                 fields
@@ -1059,11 +1066,6 @@ impl FastCsvApp {
                                         ui.add(egui::Label::new(field).sense(egui::Sense::click()))
                                     };
 
-                                    // Show tooltip with full content on hover (for truncated cells)
-                                    if field.len() > 30 {
-                                        response.clone().on_hover_text(field);
-                                    }
-
                                     // Handle double-click to open cell viewer (works for any cell)
                                     if response.double_clicked() {
                                         // Get column name
@@ -1086,9 +1088,16 @@ impl FastCsvApp {
                                         self.json_viewer.col = col_idx;
                                         self.json_viewer.column_name = col_name;
                                     }
+
+                                    // Show tooltip with full content on hover (for truncated cells)
+                                    // Only show if content is long enough to be truncated
+                                    // Note: on_hover_text consumes response, so this must be last
+                                    if field.len() > 50 {
+                                        response.on_hover_text(field);
+                                    }
                                 });
                             }
-
+                            
                             // Fill remaining columns if row has fewer fields than headers
                             for _ in fields.len()..num_columns {
                                 row.col(|ui| {
@@ -1118,31 +1127,39 @@ impl FastCsvApp {
         let state = self.state.read();
 
         ui.horizontal(|ui| match state.load_state {
-            LoadState::Empty => {
-                ui.label("No file loaded");
-            }
-            LoadState::Indexing => {
-                let rows = state.rows_indexed.load(Ordering::Relaxed);
-                ui.spinner();
-                ui.label(format!("Indexing... {} rows", format_number(rows)));
-            }
-            LoadState::Ready => {
-                if let Some(csv) = &state.csv {
-                    ui.label(format!("Rows: {}", format_number(csv.total_rows)));
-                    ui.separator();
-                    ui.label(format!("Columns: {}", csv.headers.len()));
-                    ui.separator();
-                    ui.label(format!("Size: {}", format_file_size(csv.file_size)));
-                    ui.separator();
-                    ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
+                LoadState::Empty => {
+                    ui.label("No file loaded");
                 }
-            }
-            LoadState::Error => {
-                ui.colored_label(
-                    egui::Color32::RED,
-                    state.error_message.as_deref().unwrap_or("Unknown error"),
-                );
-            }
+                LoadState::Indexing => {
+                    let rows = state.rows_indexed.load(Ordering::Relaxed);
+                    ui.spinner();
+                    ui.label(format!("Indexing... {} rows", format_number(rows)));
+                }
+                LoadState::Ready => {
+                    if let Some(csv) = &state.csv {
+                        let row_count = csv.indexed_row_count();
+                        let is_still_indexing = !state.indexing_complete.load(Ordering::Relaxed);
+
+                        if is_still_indexing {
+                            ui.spinner();
+                            ui.label(format!("Rows: {}...", format_number(row_count)));
+                        } else {
+                            ui.label(format!("Rows: {}", format_number(row_count)));
+                        }
+                        ui.separator();
+                        ui.label(format!("Columns: {}", csv.headers.len()));
+                        ui.separator();
+                        ui.label(format!("Size: {}", format_file_size(csv.file_size)));
+                        ui.separator();
+                        ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
+                    }
+                }
+                LoadState::Error => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        state.error_message.as_deref().unwrap_or("Unknown error"),
+                    );
+                }
         });
     }
 
@@ -1482,10 +1499,12 @@ impl eframe::App for FastCsvApp {
 }
 
 /// Load and index a CSV file in the background
-fn load_and_index_csv(
+/// Initialize CSV file for progressive loading - parses headers and starts indexing
+fn init_csv_progressive(
     path: &PathBuf,
     state: &Arc<RwLock<SharedState>>,
-) -> Result<MappedCsv, String> {
+    ctx: &egui::Context,
+) -> Result<(), String> {
     // Open and memory-map the file
     let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
     let metadata = file
@@ -1501,49 +1520,13 @@ fn load_and_index_csv(
     let mmap =
         unsafe { Mmap::map(&file) }.map_err(|e| format!("Failed to memory-map file: {e}"))?;
 
-    // Index row offsets by scanning for newlines
-    let mut row_offsets = Vec::with_capacity((file_size / 50) as usize); // Estimate ~50 bytes per row
-    row_offsets.push(0); // First row starts at byte 0
-
-    let cancel_flag = &state.read().cancel_indexing;
-    let rows_indexed = &state.read().rows_indexed;
-
-    let mut offset = 0;
     let bytes = &mmap[..];
 
-    while offset < bytes.len() {
-        // Check for cancellation
-        if cancel_flag.load(Ordering::Relaxed) {
-            return Err("Indexing cancelled".to_string());
-        }
-
-        // Find next newline
-        if let Some(pos) = memchr::memchr(b'\n', &bytes[offset..]) {
-            offset += pos + 1;
-            if offset < bytes.len() {
-                row_offsets.push(offset);
-            }
-
-            // Update progress every 10000 rows
-            if row_offsets.len() % 10000 == 0 {
-                rows_indexed.store(row_offsets.len(), Ordering::Relaxed);
-            }
-        } else {
-            break;
-        }
-    }
-
-    // Final row count update
-    rows_indexed.store(row_offsets.len(), Ordering::Relaxed);
-
-    if row_offsets.len() < 2 {
-        return Err("File has no data rows".to_string());
-    }
+    // Find the first newline to get headers
+    let first_newline = memchr::memchr(b'\n', bytes).unwrap_or(bytes.len());
 
     // Parse headers from first row
-    let header_end = row_offsets.get(1).copied().unwrap_or(bytes.len());
-    let header_bytes = &bytes[0..header_end];
-
+    let header_bytes = &bytes[0..first_newline];
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .from_reader(header_bytes);
@@ -1555,16 +1538,125 @@ fn load_and_index_csv(
         .map(|record| record.iter().map(|s| s.to_string()).collect())
         .unwrap_or_else(|| vec!["Column".to_string()]);
 
-    let total_rows = row_offsets.len() - 1; // Subtract 1 for header
+    // Create shared row_offsets with just the header and first data row
+    let row_offsets = Arc::new(RwLock::new(vec![0, first_newline + 1]));
 
-    Ok(MappedCsv {
+    // Create MappedCsv immediately so UI can show data
+    let mapped_csv = MappedCsv {
         mmap,
-        row_offsets,
+        row_offsets: Arc::clone(&row_offsets),
         headers,
-        total_rows,
         path: path.clone(),
         file_size,
-    })
+    };
+
+    // Update state to Ready immediately so UI shows data
+    {
+        let mut state_guard = state.write();
+        state_guard.csv = Some(mapped_csv);
+        state_guard.load_state = LoadState::Ready;
+        state_guard.rows_indexed.store(1, Ordering::Relaxed);
+        state_guard.indexing_complete.store(false, Ordering::Relaxed);
+    }
+
+    // Request UI repaint to show the data immediately
+    ctx.request_repaint();
+
+    // Continue indexing in background - we need to re-map the file in the background thread
+    // because the mmap in MappedCsv is already used by the UI
+    let state_clone = Arc::clone(state);
+    let ctx_clone = ctx.clone();
+    let path_clone = path.clone();
+    let start_offset = first_newline + 1;
+
+    thread::spawn(move || {
+        // Re-open and map the file for indexing (UI uses its own map)
+        let file = match File::open(&path_clone) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+
+        let mmap = match unsafe { Mmap::map(&file) } {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+    let bytes = &mmap[..];
+
+        // Get references we need from state
+        let (row_offsets_ref, cancel_flag, _rows_indexed, _indexing_complete) = {
+            let state_guard = state_clone.read();
+            let csv = match &state_guard.csv {
+                Some(csv) => csv,
+                None => return,
+            };
+            (
+                Arc::clone(&csv.row_offsets),
+                state_guard.cancel_indexing.load(Ordering::Relaxed),
+                Arc::new(AtomicUsize::new(0)), // We'll update state directly
+                Arc::new(AtomicBool::new(false)),
+            )
+        };
+
+        let _ = cancel_flag; // silence warning
+
+        let mut offset = start_offset;
+        let mut batch_offsets = Vec::with_capacity(10000);
+    
+    while offset < bytes.len() {
+        // Check for cancellation
+            {
+                let state_guard = state_clone.read();
+                if state_guard.cancel_indexing.load(Ordering::Relaxed) {
+                    return;
+                }
+        }
+
+        // Find next newline
+        if let Some(pos) = memchr::memchr(b'\n', &bytes[offset..]) {
+            offset += pos + 1;
+            if offset < bytes.len() {
+                    batch_offsets.push(offset);
+                }
+
+                // Batch update every 10000 rows for better performance
+                if batch_offsets.len() >= 10000 {
+                    {
+                        let mut offsets = row_offsets_ref.write();
+                        offsets.extend(batch_offsets.drain(..));
+                        let count = offsets.len();
+                        drop(offsets);
+
+                        let state_guard = state_clone.read();
+                        state_guard.rows_indexed.store(count, Ordering::Relaxed);
+                    }
+                    ctx_clone.request_repaint();
+            }
+        } else {
+            break;
+        }
+    }
+
+        // Final batch
+        if !batch_offsets.is_empty() {
+            let mut offsets = row_offsets_ref.write();
+            offsets.extend(batch_offsets);
+            let count = offsets.len();
+            drop(offsets);
+
+            let state_guard = state_clone.read();
+            state_guard.rows_indexed.store(count, Ordering::Relaxed);
+        }
+
+        // Mark indexing as complete
+        {
+            let state_guard = state_clone.read();
+            state_guard.indexing_complete.store(true, Ordering::SeqCst);
+        }
+        ctx_clone.request_repaint();
+    });
+
+    Ok(())
 }
 
 /// Format a number with thousand separators
@@ -1615,7 +1707,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             // Follow system theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-
+            
             Ok(Box::new(FastCsvApp::default()))
         }),
     )
