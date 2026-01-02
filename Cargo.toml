@@ -1,0 +1,37 @@
+[package]
+name = "fastcsv"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance CSV viewer for macOS"
+authors = ["FastCSV Team"]
+
+[dependencies]
+# GUI framework - immediate mode, native macOS support
+eframe = { version = "0.29", features = ["default"] }
+
+# Extended widgets including virtualized tables
+egui_extras = { version = "0.29", features = ["default"] }
+
+# Memory-mapped file I/O for zero-copy loading
+memmap2 = "0.9"
+
+# CSV parsing - streaming, no full file load
+csv = "1.3"
+
+# Native file dialogs (uses NSOpenPanel on macOS)
+rfd = "0.15"
+
+# Fast mutexes for thread synchronization
+parking_lot = "0.12"
+
+# Human-readable file sizes
+humansize = "2.1"
+
+# SIMD-accelerated byte searching for fast row indexing
+memchr = "2.7"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
