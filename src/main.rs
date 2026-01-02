@@ -1,4 +1,4 @@
-//! FastCSV - High-Performance CSV Viewer for macOS
+//! QuickCSV - High-Performance CSV Viewer for macOS
 //!
 //! A memory-mapped, virtualized CSV viewer that can handle files from 100MB to 2GB+
 //! with zero lag. Uses memmap2 for zero-copy file loading and egui for the UI.
@@ -837,7 +837,7 @@ impl eframe::App for FastCsvApp {
                 LoadState::Empty => {
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
-                            ui.heading("FastCSV");
+                            ui.heading("QuickCSV");
                             ui.add_space(20.0);
                             if ui.button("📂 Open CSV File").clicked() {
                                 self.open_file(ctx);
@@ -998,13 +998,13 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title("FastCSV")
+            .with_title("QuickCSV")
             .with_drag_and_drop(true),
         ..Default::default()
     };
 
     eframe::run_native(
-        "FastCSV",
+        "QuickCSV",
         options,
         Box::new(|cc| {
             // Follow system theme
