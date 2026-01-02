@@ -1,6 +1,6 @@
 [package]
 name = "quickcsv"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "High-performance CSV viewer for macOS"
 authors = ["QuickCSV Team"]
@@ -12,7 +12,7 @@ repository = "https://github.com/ayu5h-raj/quickcsv"
 name = "QuickCSV"
 identifier = "com.quickcsv.app"
 # icon = ["icons/icon.icns"]  # Uncomment when you have an icon
-version = "0.2.0"
+version = "0.3.0"
 copyright = "Copyright © 2026 QuickCSV Team"
 category = "Developer Tool"
 short_description = "High-performance CSV viewer"
