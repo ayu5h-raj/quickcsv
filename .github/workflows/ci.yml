@@ -43,14 +43,3 @@ jobs:
 
       - name: Run tests
         run: cargo test --release
-
-  # Optional: Build on multiple platforms
-  build-check:
-    strategy:
-      matrix:
-        os: [macos-latest, macos-13]  # Intel and Apple Silicon
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
