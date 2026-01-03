@@ -25,3 +25,4 @@
 # Generated test data (large files)
 *.csv
 
+.cursor/
