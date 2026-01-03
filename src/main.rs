@@ -936,7 +936,7 @@ impl FastCsvApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("✕").clicked() {
+                if ui.button(egui_phosphor::regular::X).clicked() {
                     self.search.cancel_flag.store(true, Ordering::SeqCst);
                     self.search.visible = false;
                     self.search.query.clear();
@@ -1432,7 +1432,13 @@ impl FastCsvApp {
                 ui.horizontal(|ui| {
                     // Copy buttons on the left
                     if ui
-                        .add(egui::Button::new("📋 Copy Formatted").min_size([120.0, 28.0].into()))
+                        .add(
+                            egui::Button::new(format!(
+                                "{} Copy Formatted",
+                                egui_phosphor::regular::COPY
+                            ))
+                            .min_size([140.0, 28.0].into()),
+                        )
                         .clicked()
                     {
                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
@@ -1443,7 +1449,13 @@ impl FastCsvApp {
                     ui.add_space(8.0);
 
                     if ui
-                        .add(egui::Button::new("📄 Copy Raw").min_size([100.0, 28.0].into()))
+                        .add(
+                            egui::Button::new(format!(
+                                "{} Copy Raw",
+                                egui_phosphor::regular::FILE_TEXT
+                            ))
+                            .min_size([120.0, 28.0].into()),
+                        )
                         .clicked()
                     {
                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
@@ -1455,7 +1467,7 @@ impl FastCsvApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new("✕ Close")
+                                egui::Button::new(format!("{} Close", egui_phosphor::regular::X))
                                     .min_size([80.0, 28.0].into())
                                     .fill(Color32::from_rgb(60, 60, 70)),
                             )
@@ -1620,7 +1632,10 @@ impl FastCsvApp {
 
                     // Copy buttons on the right
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("📋 Copy as CSV").clicked() {
+                        if ui
+                            .button(format!("{} Copy as CSV", egui_phosphor::regular::COPY))
+                            .clicked()
+                        {
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let csv_row = self
                                     .row_detail
@@ -1639,7 +1654,10 @@ impl FastCsvApp {
                             }
                         }
 
-                        if ui.button("📋 Copy as JSON").clicked() {
+                        if ui
+                            .button(format!("{} Copy as JSON", egui_phosphor::regular::CODE))
+                            .clicked()
+                        {
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let mut json_obj = serde_json::Map::new();
                                 for (i, field) in self.row_detail.fields.iter().enumerate() {
@@ -1712,7 +1730,7 @@ impl FastCsvApp {
                                             |ui| {
                                                 // Copy button
                                                 if ui
-                                                    .small_button("📋")
+                                                    .small_button(egui_phosphor::regular::COPY)
                                                     .on_hover_text("Copy value")
                                                     .clicked()
                                                 {
@@ -1726,7 +1744,7 @@ impl FastCsvApp {
                                                 // JSON button if it looks like JSON
                                                 if is_json
                                                     && ui
-                                                        .small_button("📄")
+                                                        .small_button(egui_phosphor::regular::CODE)
                                                         .on_hover_text("View as JSON")
                                                         .clicked()
                                                 {
@@ -1739,8 +1757,11 @@ impl FastCsvApp {
 
                                                 // Expand/collapse for large values
                                                 if is_large {
-                                                    let btn_text =
-                                                        if is_expanded { "▲" } else { "▼" };
+                                                    let btn_text = if is_expanded {
+                                                        egui_phosphor::regular::CARET_UP
+                                                    } else {
+                                                        egui_phosphor::regular::CARET_DOWN
+                                                    };
                                                     if ui
                                                         .small_button(btn_text)
                                                         .on_hover_text(if is_expanded {
@@ -1789,7 +1810,7 @@ impl FastCsvApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new("✕ Close")
+                                egui::Button::new(format!("{} Close", egui_phosphor::regular::X))
                                     .min_size([80.0, 28.0].into())
                                     .fill(Color32::from_rgb(60, 60, 70)),
                             )
@@ -1991,7 +2012,7 @@ impl eframe::App for FastCsvApp {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.add_space(10.0);
-                                        if ui.small_button("✕").clicked() {
+                                        if ui.small_button(egui_phosphor::regular::X).clicked() {
                                             self.update_state.dismissed = true;
                                         }
                                     },
