@@ -957,7 +957,7 @@ impl FastCsvApp {
                                 // Create clickable header with sort indicator
                                 let sort_indicator = if current_sort_col == Some(col_idx) {
                                     if is_sorting {
-                                        format!(" ({}%)", sort_progress)
+                                        format!(" ({sort_progress}%)")
                                     } else {
                                         match current_sort_dir {
                                             SortDirection::Ascending => " (asc)".to_string(),
@@ -969,7 +969,7 @@ impl FastCsvApp {
                                     String::new()
                                 };
 
-                                let header_text = format!("{}{}", col_name, sort_indicator);
+                                let header_text = format!("{col_name}{sort_indicator}");
 
                                 // Dim text if sorting in progress
                                 let text = if is_sorting && current_sort_col == Some(col_idx) {
@@ -1030,11 +1030,17 @@ impl FastCsvApp {
                             for (col_idx, field) in fields.iter().enumerate() {
                                 row.col(|ui| {
                                     // Check if this cell matches the search query
+                                    // Optimization: skip expensive to_lowercase on huge fields
                                     let is_match = !search_query.is_empty()
+                                        && field.len() < 100_000  // Skip search highlight on >100KB fields
                                         && field.to_lowercase().contains(&search_query);
 
-                                    // Check if this looks like JSON
+                                    // Check if this looks like JSON (optimized for large strings)
                                     let is_json = looks_like_json(field);
+
+                                    // PERFORMANCE: Truncate display string for huge fields
+                                    // Full content is still available via double-click popup
+                                    let display_text = truncate_for_display(field);
 
                                     // Create a clickable label
                                     let response = if is_match && is_current_nav_row {
@@ -1043,7 +1049,7 @@ impl FastCsvApp {
                                         ui.painter().rect_filled(rect, 2.0, CURRENT_MATCH_COLOR);
                                         ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(field).color(Color32::BLACK),
+                                                egui::RichText::new(display_text.as_ref()).color(Color32::BLACK),
                                             )
                                             .sense(egui::Sense::click()),
                                         )
@@ -1053,7 +1059,7 @@ impl FastCsvApp {
                                         ui.painter().rect_filled(rect, 2.0, HIGHLIGHT_COLOR);
                                         ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(field).color(Color32::BLACK),
+                                                egui::RichText::new(display_text.as_ref()).color(Color32::BLACK),
                                             )
                                             .sense(egui::Sense::click()),
                                         )
@@ -1061,13 +1067,13 @@ impl FastCsvApp {
                                         // JSON content - show with subtle indicator
                                         ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(field)
+                                                egui::RichText::new(display_text.as_ref())
                                                     .color(Color32::from_rgb(100, 180, 255)),
                                             )
                                             .sense(egui::Sense::click()),
                                         )
                                     } else {
-                                        ui.add(egui::Label::new(field).sense(egui::Sense::click()))
+                                        ui.add(egui::Label::new(display_text.as_ref()).sense(egui::Sense::click()))
                                     };
 
                                     // Handle double-click to open cell viewer (works for any cell)
@@ -1093,11 +1099,17 @@ impl FastCsvApp {
                                         self.json_viewer.column_name = col_name;
                                     }
 
-                                    // Show tooltip with full content on hover (for truncated cells)
-                                    // Only show if content is long enough to be truncated
-                                    // Note: on_hover_text consumes response, so this must be last
+                                    // Show tooltip for truncated cells
+                                    // Limit tooltip size to avoid performance issues with huge fields
+                                    // Full content available via double-click popup
                                     if field.len() > 50 {
-                                        response.on_hover_text(field);
+                                        if field.len() <= 500 {
+                                            response.on_hover_text(field);
+                                        } else {
+                                            // For very large fields, show truncated preview + hint
+                                            let preview: String = field.chars().take(500).collect();
+                                            response.on_hover_text(format!("{}…\n\n(Double-click to view full content: {} bytes)", preview, field.len()));
+                                        }
                                     }
                                 });
                             }
@@ -1209,7 +1221,7 @@ impl FastCsvApp {
                     // Location info with icons
                     ui.label(egui::RichText::new("📍").size(14.0));
                     ui.label(
-                        egui::RichText::new(format!("Row {}", row_num))
+                        egui::RichText::new(format!("Row {row_num}"))
                             .color(Color32::from_rgb(180, 180, 180)),
                     );
                     ui.label(egui::RichText::new("•").color(Color32::from_rgb(100, 100, 100)));
@@ -1703,10 +1715,45 @@ fn format_file_size(bytes: u64) -> String {
 }
 
 /// Check if a string looks like JSON (starts with { or [)
+/// Optimized: only checks first/last characters, doesn't scan entire string
 fn looks_like_json(s: &str) -> bool {
-    let trimmed = s.trim();
-    (trimmed.starts_with('{') && trimmed.ends_with('}'))
-        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    // For huge strings, only check the boundaries (first 100 and last 100 chars)
+    // This avoids O(n) trim() on megabyte strings
+    let len = s.len();
+    if len == 0 {
+        return false;
+    }
+
+    // Find first non-whitespace
+    let first_char = s.bytes().take(100).find(|&b| !b.is_ascii_whitespace());
+    // Find last non-whitespace
+    let last_char = s
+        .bytes()
+        .rev()
+        .take(100)
+        .find(|&b| !b.is_ascii_whitespace());
+
+    matches!(
+        (first_char, last_char),
+        (Some(b'{'), Some(b'}')) | (Some(b'['), Some(b']'))
+    )
+}
+
+/// Truncate a string for display, keeping it short for UI performance
+/// Full content is available via double-click popup
+const MAX_DISPLAY_LEN: usize = 200;
+
+fn truncate_for_display(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.len() <= MAX_DISPLAY_LEN {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        // Find a safe UTF-8 boundary
+        let mut end = MAX_DISPLAY_LEN;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        std::borrow::Cow::Owned(format!("{}…", &s[..end]))
+    }
 }
 
 /// Find the next row boundary in CSV data, respecting quoted fields.
