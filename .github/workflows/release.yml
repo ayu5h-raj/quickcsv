@@ -83,9 +83,14 @@ jobs:
           prerelease: false
 
   update-homebrew:
-    needs: create-release
+    needs: [build-macos, create-release]
     runs-on: ubuntu-latest
     steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: QuickCSV-macos
+
       - name: Update Homebrew Tap
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -94,9 +99,8 @@ jobs:
           # Remove 'v' prefix for cask version
           CASK_VERSION="${VERSION#v}"
           
-          # Download the release zip and calculate SHA256
-          curl -sL "https://github.com/ayu5h-raj/quickcsv/releases/download/${VERSION}/QuickCSV-${VERSION}-macos.zip" -o quickcsv.zip
-          SHA256=$(shasum -a 256 quickcsv.zip | cut -d' ' -f1)
+          # Calculate SHA256 from downloaded artifact
+          SHA256=$(shasum -a 256 QuickCSV-${VERSION}-macos.zip | cut -d' ' -f1)
           
           echo "Version: $CASK_VERSION"
           echo "SHA256: $SHA256"
