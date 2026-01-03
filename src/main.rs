@@ -45,6 +45,8 @@ struct MappedCsv {
     path: PathBuf,
     /// File size in bytes
     file_size: u64,
+    /// Detected delimiter (comma, tab, semicolon, pipe)
+    delimiter: u8,
 }
 
 impl MappedCsv {
@@ -83,6 +85,7 @@ impl MappedCsv {
         let bytes = self.get_row_bytes(row_index)?;
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(false)
+            .delimiter(self.delimiter)
             .from_reader(bytes);
 
         reader.records().next().and_then(|result| {
@@ -90,6 +93,17 @@ impl MappedCsv {
                 .ok()
                 .map(|record| record.iter().map(|s| s.to_string()).collect())
         })
+    }
+
+    /// Get human-readable delimiter name for display
+    fn delimiter_name(&self) -> &'static str {
+        match self.delimiter {
+            b',' => "Comma",
+            b'\t' => "Tab",
+            b';' => "Semicolon",
+            b'|' => "Pipe",
+            _ => "Unknown",
+        }
     }
 }
 
@@ -1259,6 +1273,8 @@ impl FastCsvApp {
                     ui.separator();
                     ui.label(format!("Columns: {}", csv.headers.len()));
                     ui.separator();
+                    ui.label(format!("Delimiter: {}", csv.delimiter_name()));
+                    ui.separator();
                     ui.label(format!("Size: {}", format_file_size(csv.file_size)));
                     ui.separator();
                     ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
@@ -1791,6 +1807,9 @@ fn init_csv_progressive(
 
     let bytes = &mmap[..];
 
+    // Detect delimiter from file content
+    let delimiter = detect_delimiter(bytes);
+
     // Find the first row boundary (quote-aware) to get headers
     let first_row_end = find_row_boundary(bytes, 0).unwrap_or(bytes.len());
     // Strip trailing newline/CRLF for header parsing
@@ -1807,10 +1826,11 @@ fn init_csv_progressive(
         first_row_end
     };
 
-    // Parse headers from first row
+    // Parse headers from first row using detected delimiter
     let header_bytes = &bytes[0..header_end];
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
+        .delimiter(delimiter)
         .from_reader(header_bytes);
 
     let headers: Vec<String> = reader
@@ -1830,6 +1850,7 @@ fn init_csv_progressive(
         headers,
         path: path.clone(),
         file_size,
+        delimiter,
     };
 
     // Update state to Ready immediately so UI shows data
@@ -1946,6 +1967,86 @@ fn init_csv_progressive(
     });
 
     Ok(())
+}
+
+/// Detect the delimiter used in a CSV file by analyzing the first few lines
+///
+/// Algorithm:
+/// 1. Read the first 5 lines
+/// 2. Count occurrences of common delimiters: comma, tab, semicolon, pipe
+/// 3. Pick the delimiter that appears most consistently across lines
+/// 4. Fall back to comma if no clear winner
+fn detect_delimiter(bytes: &[u8]) -> u8 {
+    const CANDIDATES: [u8; 4] = [b',', b'\t', b';', b'|'];
+    const MAX_LINES: usize = 5;
+    const MAX_BYTES: usize = 10000; // Don't scan too much
+
+    let scan_bytes = &bytes[..bytes.len().min(MAX_BYTES)];
+
+    // Split into lines (simple split, not quote-aware for speed)
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut start = 0;
+    for (i, &b) in scan_bytes.iter().enumerate() {
+        if b == b'\n' {
+            if i > start {
+                lines.push(&scan_bytes[start..i]);
+            }
+            start = i + 1;
+            if lines.len() >= MAX_LINES {
+                break;
+            }
+        }
+    }
+    // Add last line if no trailing newline
+    if start < scan_bytes.len() && lines.len() < MAX_LINES {
+        lines.push(&scan_bytes[start..]);
+    }
+
+    if lines.is_empty() {
+        return b','; // Default to comma
+    }
+
+    // Count each delimiter in each line
+    let mut best_delimiter = b',';
+    let mut best_score: i32 = -1;
+
+    for &delim in &CANDIDATES {
+        let counts: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                // Count delimiter occurrences (simple count, ignoring quotes for speed)
+                line.iter().filter(|&&b| b == delim).count()
+            })
+            .collect();
+
+        // Skip if no occurrences
+        if counts.iter().all(|&c| c == 0) {
+            continue;
+        }
+
+        // Calculate score based on consistency
+        // Higher score = more consistent counts across lines
+        let first_count = counts[0];
+        let all_same = counts.iter().all(|&c| c == first_count && c > 0);
+        let total: usize = counts.iter().sum();
+
+        let score = if all_same && first_count > 0 {
+            // Perfect consistency: high score
+            (total * 10) as i32
+        } else if first_count > 0 {
+            // Some occurrences but inconsistent
+            total as i32
+        } else {
+            0
+        };
+
+        if score > best_score {
+            best_score = score;
+            best_delimiter = delim;
+        }
+    }
+
+    best_delimiter
 }
 
 /// Format a number with thousand separators
@@ -2273,5 +2374,40 @@ mod tests {
         assert!(!is_newer_version("0.3.2", "0.3.2")); // Same version
         assert!(!is_newer_version("0.3.1", "0.3.2")); // Older version
         assert!(!is_newer_version("0.2.0", "0.3.0")); // Older major
+    }
+
+    // -------------------------------------------------------------------------
+    // detect_delimiter tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_detect_delimiter_comma() {
+        let data = b"name,age,city\nJohn,30,NYC\nJane,25,LA\n";
+        assert_eq!(detect_delimiter(data), b',');
+    }
+
+    #[test]
+    fn test_detect_delimiter_tab() {
+        let data = b"name\tage\tcity\nJohn\t30\tNYC\nJane\t25\tLA\n";
+        assert_eq!(detect_delimiter(data), b'\t');
+    }
+
+    #[test]
+    fn test_detect_delimiter_semicolon() {
+        let data = b"name;age;city\nJohn;30;NYC\nJane;25;LA\n";
+        assert_eq!(detect_delimiter(data), b';');
+    }
+
+    #[test]
+    fn test_detect_delimiter_pipe() {
+        let data = b"name|age|city\nJohn|30|NYC\nJane|25|LA\n";
+        assert_eq!(detect_delimiter(data), b'|');
+    }
+
+    #[test]
+    fn test_detect_delimiter_default_comma() {
+        // No clear delimiter, should default to comma
+        let data = b"just some text\nmore text here\n";
+        assert_eq!(detect_delimiter(data), b',');
     }
 }

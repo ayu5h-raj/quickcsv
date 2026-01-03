@@ -1,0 +1,11 @@
+product_id,product_name,description,price,category,json_metadata
+1001,"Wireless Mouse","Ergonomic wireless mouse with USB receiver",29.99,Electronics,"{""color"":""black"",""dpi"":1600,""battery"":""AA""}"
+1002,"Mechanical Keyboard","RGB backlit mechanical keyboard with Cherry MX switches",149.99,Electronics,"{""switches"":""Cherry MX Blue"",""keys"":104,""backlight"":true}"
+1003,"USB-C Hub","7-in-1 USB-C hub with HDMI, SD card reader",59.99,Electronics,"{""ports"":[""HDMI"",""USB-A"",""USB-C"",""SD""],""power_delivery"":100}"
+1004,"Monitor Stand","Adjustable aluminum monitor stand with USB ports",89.99,Office,"{""material"":""aluminum"",""height_adjustable"":true,""usb_ports"":2}"
+1005,"Webcam HD","1080p HD webcam with built-in microphone",79.99,Electronics,"{""resolution"":""1080p"",""fps"":30,""mic"":true}"
+1006,"Desk Lamp","LED desk lamp with wireless charging base",45.99,Office,"{""lumens"":500,""color_temp"":[3000,6500],""wireless_charging"":true}"
+1007,"Notebook Set","Pack of 5 premium lined notebooks",24.99,Office,"{""count"":5,""pages_each"":200,""size"":""A5""}"
+1008,"Headphone Stand","Wooden headphone stand with cable management",34.99,Accessories,"{""material"":""walnut"",""cable_hook"":true}"
+1009,"Mouse Pad XL","Extended gaming mouse pad, 900x400mm",19.99,Accessories,"{""size"":""900x400mm"",""thickness"":""4mm"",""surface"":""cloth""}"
+1010,"Cable Organizer","Magnetic cable clips, pack of 6",12.99,Accessories,"{""count"":6,""magnetic"":true,""colors"":[""black"",""white"",""gray""]}"

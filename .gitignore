@@ -23,7 +23,8 @@
 .DS_Store
 
 # Generated test data (large files)
-*.csv
+/*.csv
+!test_data/
 
 .cursor/
 
