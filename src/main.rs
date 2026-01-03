@@ -417,9 +417,9 @@ impl FastCsvApp {
             let result = init_csv_progressive(&path_clone, &state, &ctx);
 
             if let Err(e) = result {
-            let mut state_guard = state.write();
-                    state_guard.load_state = LoadState::Error;
-                    state_guard.error_message = Some(e);
+                let mut state_guard = state.write();
+                state_guard.load_state = LoadState::Error;
+                state_guard.error_message = Some(e);
                 ctx.request_repaint();
             }
         });
@@ -516,7 +516,7 @@ impl FastCsvApp {
                 if row_idx % 5000 == 0 {
                     let pct = (row_idx * 50) / rows_to_sort;
                     progress.store(pct, Ordering::Relaxed);
-            ctx.request_repaint();
+                    ctx.request_repaint();
                 }
             }
 
@@ -1073,7 +1073,7 @@ impl FastCsvApp {
                                     vec![]
                                 };
                                 drop(state);
-                                
+
                                 // Cache for next render
                                 self.row_cache.insert(actual_row_idx, fields.clone());
                                 fields
@@ -1207,7 +1207,7 @@ impl FastCsvApp {
                                     }
                                 });
                             }
-                            
+
                             // Fill remaining columns if row has fewer fields than headers
                             for _ in fields.len()..num_columns {
                                 row.col(|ui| {
@@ -1237,16 +1237,16 @@ impl FastCsvApp {
         let state = self.state.read();
 
         ui.horizontal(|ui| match state.load_state {
-                LoadState::Empty => {
-                    ui.label("No file loaded");
-                }
-                LoadState::Indexing => {
-                    let rows = state.rows_indexed.load(Ordering::Relaxed);
-                    ui.spinner();
-                    ui.label(format!("Indexing... {} rows", format_number(rows)));
-                }
-                LoadState::Ready => {
-                    if let Some(csv) = &state.csv {
+            LoadState::Empty => {
+                ui.label("No file loaded");
+            }
+            LoadState::Indexing => {
+                let rows = state.rows_indexed.load(Ordering::Relaxed);
+                ui.spinner();
+                ui.label(format!("Indexing... {} rows", format_number(rows)));
+            }
+            LoadState::Ready => {
+                if let Some(csv) = &state.csv {
                     let row_count = csv.indexed_row_count();
                     let is_still_indexing = !state.indexing_complete.load(Ordering::Relaxed);
 
@@ -1256,20 +1256,20 @@ impl FastCsvApp {
                     } else {
                         ui.label(format!("Rows: {}", format_number(row_count)));
                     }
-                        ui.separator();
-                        ui.label(format!("Columns: {}", csv.headers.len()));
-                        ui.separator();
-                        ui.label(format!("Size: {}", format_file_size(csv.file_size)));
-                        ui.separator();
-                        ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
-                    }
+                    ui.separator();
+                    ui.label(format!("Columns: {}", csv.headers.len()));
+                    ui.separator();
+                    ui.label(format!("Size: {}", format_file_size(csv.file_size)));
+                    ui.separator();
+                    ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
                 }
-                LoadState::Error => {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        state.error_message.as_deref().unwrap_or("Unknown error"),
-                    );
-                }
+            }
+            LoadState::Error => {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    state.error_message.as_deref().unwrap_or("Unknown error"),
+                );
+            }
         });
     }
 
@@ -1790,7 +1790,7 @@ fn init_csv_progressive(
         unsafe { Mmap::map(&file) }.map_err(|e| format!("Failed to memory-map file: {e}"))?;
 
     let bytes = &mmap[..];
-    
+
     // Find the first row boundary (quote-aware) to get headers
     let first_row_end = find_row_boundary(bytes, 0).unwrap_or(bytes.len());
     // Strip trailing newline/CRLF for header parsing
@@ -1803,7 +1803,7 @@ fn init_csv_progressive(
             end -= 1;
         }
         end
-        } else {
+    } else {
         first_row_end
     };
 
@@ -1812,7 +1812,7 @@ fn init_csv_progressive(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .from_reader(header_bytes);
-    
+
     let headers: Vec<String> = reader
         .records()
         .next()
@@ -2135,7 +2135,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             // Follow system theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            
+
             Ok(Box::new(FastCsvApp::default()))
         }),
     )
