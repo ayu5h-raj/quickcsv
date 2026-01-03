@@ -13,7 +13,10 @@ A blazing-fast CSV viewer for macOS that handles files from 100MB to 2GB+ with z
 - ⚡ **Virtualized Table** - Only visible rows are rendered
 - 🔍 **Fast Search** - Search millions of rows without freezing
 - 📄 **JSON Viewer** - Double-click JSON cells to view formatted content
-- 🎨 **Native macOS Look** - Dark theme, native file dialogs
+- 🔢 **Row Numbers** - See row numbers at a glance
+- 🎯 **Go to Row** - Jump to any row instantly (⌘L)
+- 🔄 **Update Notifications** - Know when a new version is available
+- 🎨 **Dark/Light Mode** - Toggle between themes
 - 📁 **Drag & Drop** - Just drop your CSV file
 
 ## Installation
@@ -78,6 +81,7 @@ Tested on MacBook Pro M1:
 |----------|--------|
 | `⌘O` | Open file |
 | `⌘F` | Find/Search |
+| `⌘L` | Go to row |
 | `Enter` | Execute search |
 | `Escape` | Close search/popup |
 | `F3` / `⌘G` | Next match |

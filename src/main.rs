@@ -271,6 +271,44 @@ struct JsonViewerState {
     column_name: String,
 }
 
+/// Go to row dialog state
+#[derive(Default)]
+struct GoToRowState {
+    /// Whether the dialog is open
+    open: bool,
+    /// Input text (row number)
+    input: String,
+    /// Whether to focus the input field
+    focus_input: bool,
+    /// Row to scroll to (set when confirmed)
+    scroll_to_row: Option<usize>,
+    /// Row to highlight (after jumping)
+    highlight_row: Option<usize>,
+}
+
+/// Update checker state
+struct UpdateState {
+    /// Latest version available (if checked)
+    latest_version: Arc<RwLock<Option<String>>>,
+    /// Whether an update is available
+    update_available: Arc<AtomicBool>,
+    /// Whether the update banner has been dismissed
+    dismissed: bool,
+    /// Whether check has been initiated
+    check_initiated: bool,
+}
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self {
+            latest_version: Arc::new(RwLock::new(None)),
+            update_available: Arc::new(AtomicBool::new(false)),
+            dismissed: false,
+            check_initiated: false,
+        }
+    }
+}
+
 /// Main application state
 struct FastCsvApp {
     /// Shared state with background thread
@@ -293,6 +331,10 @@ struct FastCsvApp {
     dark_mode: bool,
     /// Column sort state
     sort_state: SortState,
+    /// Go to row dialog state
+    go_to_row: GoToRowState,
+    /// Update checker state
+    update_state: UpdateState,
 }
 
 impl Default for FastCsvApp {
@@ -308,6 +350,8 @@ impl Default for FastCsvApp {
             json_viewer: JsonViewerState::default(),
             dark_mode: true, // Default to dark mode
             sort_state: SortState::default(),
+            go_to_row: GoToRowState::default(),
+            update_state: UpdateState::default(),
         }
     }
 }
@@ -904,8 +948,12 @@ impl FastCsvApp {
 
         let _text_color = ui.style().visuals.text_color();
 
-        // Handle scroll to row request
-        let scroll_to_row = self.search.scroll_to_row.take();
+        // Handle scroll to row request (from search or go-to-row dialog)
+        let scroll_to_row = self
+            .search
+            .scroll_to_row
+            .take()
+            .or_else(|| self.go_to_row.scroll_to_row.take());
 
         // Wrap table in horizontal scroll area for wide tables
         egui::ScrollArea::horizontal()
@@ -924,7 +972,10 @@ impl FastCsvApp {
                     table = table.scroll_to_row(row, Some(egui::Align::Center));
                 }
 
-                // Add columns with initial width - use clip(true) to prevent overflow
+                // Add row number column (fixed width, not resizable)
+                table = table.column(Column::exact(60.0).clip(true));
+
+                // Add data columns with initial width - use clip(true) to prevent overflow
                 for col_width in &self.column_widths {
                     table = table.column(Column::initial(*col_width).resizable(true).clip(true));
                 }
@@ -952,6 +1003,12 @@ impl FastCsvApp {
 
                 table
                     .header(ROW_HEIGHT, |mut header| {
+                        // Row number column header
+                            header.col(|ui| {
+                            ui.label(egui::RichText::new("#").strong());
+                        });
+
+                        // Data column headers
                         for (col_idx, col_name) in headers.iter().enumerate() {
                             header.col(|ui| {
                                 // Create clickable header with sort indicator
@@ -1025,6 +1082,27 @@ impl FastCsvApp {
                             // Check if this is the current navigation row (for special highlighting)
                             let is_current_nav_row = current_nav_row == Some(actual_row_idx);
 
+                            // Check if this row is highlighted from "Go to Row"
+                            let is_goto_highlighted = self.go_to_row.highlight_row == Some(actual_row_idx);
+
+                            // Row number column (1-indexed, shows actual row number)
+                                row.col(|ui| {
+                                // Highlight background for "Go to Row" target
+                                if is_goto_highlighted {
+                                    let rect = ui.available_rect_before_wrap();
+                                    ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(60, 100, 140));
+                                }
+                                ui.label(
+                                    egui::RichText::new(format_number(actual_row_idx + 1))
+                                        .color(if is_goto_highlighted {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgb(140, 140, 140)
+                                        })
+                                        .small(),
+                                );
+                            });
+
                             // Render each cell with ON-THE-FLY search highlighting
                             // This is O(visible_rows) per frame - no memory overhead!
                             for (col_idx, field) in fields.iter().enumerate() {
@@ -1043,6 +1121,7 @@ impl FastCsvApp {
                                     let display_text = truncate_for_display(field);
 
                                     // Create a clickable label
+                                    // Priority: search match > go-to-row highlight > JSON styling > default
                                     let response = if is_match && is_current_nav_row {
                                         // Current navigation row match - bright orange
                                         let rect = ui.available_rect_before_wrap();
@@ -1063,6 +1142,16 @@ impl FastCsvApp {
                                             )
                                             .sense(egui::Sense::click()),
                                         )
+                                    } else if is_goto_highlighted {
+                                        // Go-to-row highlight - blue background
+                                        let rect = ui.available_rect_before_wrap();
+                                        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(60, 100, 140));
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(display_text.as_ref()).color(Color32::WHITE),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
                                     } else if is_json {
                                         // JSON content - show with subtle indicator
                                         ui.add(
@@ -1075,6 +1164,11 @@ impl FastCsvApp {
                                     } else {
                                         ui.add(egui::Label::new(display_text.as_ref()).sense(egui::Sense::click()))
                                     };
+
+                                    // Handle click to clear go-to-row highlight
+                                    if response.clicked() {
+                                        self.go_to_row.highlight_row = None;
+                                    }
 
                                     // Handle double-click to open cell viewer (works for any cell)
                                     if response.double_clicked() {
@@ -1327,10 +1421,108 @@ impl FastCsvApp {
             self.json_viewer.open = false;
         }
     }
+
+    /// Render the Go to Row dialog
+    fn render_go_to_row_dialog(&mut self, ctx: &egui::Context) {
+        if !self.go_to_row.open {
+            return;
+        }
+
+        // Get total rows for validation
+        let total_rows = {
+            let state = self.state.read();
+            state
+                .csv
+                .as_ref()
+                .map(|c| c.indexed_row_count())
+                .unwrap_or(0)
+        };
+
+        if total_rows == 0 {
+            self.go_to_row.open = false;
+            return;
+        }
+
+        let mut should_close = false;
+        let mut should_go = false;
+
+        egui::Window::new("Go to Row")
+            .default_size([300.0, 100.0])
+            .resizable(false)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Row number:");
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.go_to_row.input)
+                            .hint_text(format!("1 - {}", format_number(total_rows)))
+                            .desired_width(150.0),
+                    );
+
+                    // Auto-focus on open
+                    if self.go_to_row.focus_input {
+                        response.request_focus();
+                        self.go_to_row.focus_input = false;
+                    }
+
+                    // Handle Enter key
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        should_go = true;
+                    }
+                });
+
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Go").clicked() {
+                        should_go = true;
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                        should_close = true;
+                    }
+                });
+            });
+
+        if should_go {
+            // Parse and validate row number
+            if let Ok(row_num) = self
+                .go_to_row
+                .input
+                .trim()
+                .replace(',', "")
+                .parse::<usize>()
+            {
+                if row_num >= 1 && row_num <= total_rows {
+                    // Convert to 0-indexed
+                    let row_idx = row_num - 1;
+                    self.go_to_row.scroll_to_row = Some(row_idx);
+                    self.go_to_row.highlight_row = Some(row_idx);
+                    should_close = true;
+                }
+            }
+        }
+
+        if should_close {
+            self.go_to_row.open = false;
+        }
+    }
 }
 
 impl eframe::App for FastCsvApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check for updates on startup (only once)
+        if !self.update_state.check_initiated {
+            self.update_state.check_initiated = true;
+            check_for_updates(
+                Arc::clone(&self.update_state.latest_version),
+                Arc::clone(&self.update_state.update_available),
+                ctx.clone(),
+            );
+        }
+
         // Handle keyboard shortcuts
         ctx.input(|i| {
             // Cmd/Ctrl+F to toggle search
@@ -1356,6 +1548,12 @@ impl eframe::App for FastCsvApp {
                 } else {
                     self.next_match();
                 }
+            }
+            // Cmd+L to open Go to Row dialog
+            if i.modifiers.command && i.key_pressed(Key::L) {
+                self.go_to_row.open = true;
+                self.go_to_row.focus_input = true;
+                self.go_to_row.input.clear();
             }
         });
 
@@ -1393,6 +1591,13 @@ impl eframe::App for FastCsvApp {
                         ui.close_menu();
                         self.prev_match();
                     }
+                    ui.separator();
+                    if ui.button("Go to Row... (⌘L)").clicked() {
+                        ui.close_menu();
+                        self.go_to_row.open = true;
+                        self.go_to_row.focus_input = true;
+                        self.go_to_row.input.clear();
+                    }
                 });
                 ui.menu_button("View", |ui| {
                     let theme_label = if self.dark_mode {
@@ -1426,6 +1631,51 @@ impl eframe::App for FastCsvApp {
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
                     self.render_search_bar(ui, ctx);
+                });
+        }
+
+        // Update available banner
+        if self.update_state.update_available.load(Ordering::Relaxed)
+            && !self.update_state.dismissed
+        {
+            egui::TopBottomPanel::top("update_banner")
+                .exact_height(32.0)
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(40, 80, 40))
+                        .show(ui, |ui| {
+                            ui.horizontal_centered(|ui| {
+                                ui.add_space(10.0);
+                                let version = self.update_state.latest_version.read();
+                                let version_str = version.as_deref().unwrap_or("new version");
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "⬆ Update available: v{version_str}"
+                                    ))
+                                    .color(Color32::WHITE),
+                                );
+                                ui.add_space(10.0);
+                                if ui
+                                    .add(egui::Button::new("Update via Homebrew").small())
+                                    .on_hover_text("brew upgrade --cask quickcsv")
+                                    .clicked()
+                                {
+                                    // Copy command to clipboard
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text("brew upgrade --cask quickcsv");
+                                    }
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.add_space(10.0);
+                                        if ui.small_button("✕").clicked() {
+                                            self.update_state.dismissed = true;
+                                        }
+                                    },
+                                );
+                            });
+                        });
                 });
         }
 
@@ -1501,6 +1751,9 @@ impl eframe::App for FastCsvApp {
 
         // Render JSON viewer popup (if open)
         self.render_json_popup(ctx);
+
+        // Render Go to Row dialog (if open)
+        self.render_go_to_row_dialog(ctx);
 
         // Handle dropped files
         ctx.input(|i| {
@@ -1804,6 +2057,68 @@ fn format_json(s: &str) -> Option<String> {
     serde_json::to_string_pretty(&value).ok()
 }
 
+/// Current version from Cargo.toml
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Check for updates from GitHub releases (runs in background thread)
+fn check_for_updates(
+    latest_version: Arc<RwLock<Option<String>>>,
+    update_available: Arc<AtomicBool>,
+    ctx: egui::Context,
+) {
+    thread::spawn(move || {
+        // Call GitHub API to get latest release
+        let url = "https://api.github.com/repos/ayu5h-raj/quickcsv/releases/latest";
+
+        match ureq::get(url)
+            .set("User-Agent", "QuickCSV-Update-Checker")
+            .call()
+        {
+            Ok(response) => {
+                if let Ok(body) = response.into_string() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                            // Remove 'v' prefix if present
+                            let version = tag.trim_start_matches('v');
+
+                            // Compare versions
+                            if version != CURRENT_VERSION
+                                && is_newer_version(version, CURRENT_VERSION)
+                            {
+                                *latest_version.write() = Some(version.to_string());
+                                update_available.store(true, Ordering::SeqCst);
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // Silently fail - don't bother user if update check fails
+            }
+        }
+    });
+}
+
+/// Compare version strings (simple semver comparison)
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
+
+    let latest_parts = parse(latest);
+    let current_parts = parse(current);
+
+    for (l, c) in latest_parts.iter().zip(current_parts.iter()) {
+        if l > c {
+            return true;
+        } else if l < c {
+            return false;
+        }
+    }
+
+    // If all compared parts are equal, newer if latest has more parts
+    latest_parts.len() > current_parts.len()
+}
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1824,4 +2139,139 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(FastCsvApp::default()))
         }),
     )
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // find_row_boundary tests (RFC 4180 compliance)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_find_row_boundary_simple() {
+        let data = b"row1\nrow2\nrow3";
+        assert_eq!(find_row_boundary(data, 0), Some(5)); // After "row1\n"
+        assert_eq!(find_row_boundary(data, 5), Some(10)); // After "row2\n"
+    }
+
+    #[test]
+    fn test_find_row_boundary_crlf() {
+        let data = b"row1\r\nrow2\r\n";
+        assert_eq!(find_row_boundary(data, 0), Some(6)); // After "row1\r\n"
+        assert_eq!(find_row_boundary(data, 6), Some(12)); // After "row2\r\n"
+    }
+
+    #[test]
+    fn test_find_row_boundary_quoted_newline() {
+        // Newline inside quotes should NOT be a row boundary
+        let data = b"\"hello\nworld\",value\nnext";
+        assert_eq!(find_row_boundary(data, 0), Some(20)); // After the full first row
+    }
+
+    #[test]
+    fn test_find_row_boundary_escaped_quotes() {
+        // Escaped quotes ("") inside quoted field
+        let data = b"\"say \"\"hello\"\"\",value\nnext";
+        assert_eq!(find_row_boundary(data, 0), Some(22));
+    }
+
+    #[test]
+    fn test_find_row_boundary_no_newline() {
+        let data = b"single row no newline";
+        assert_eq!(find_row_boundary(data, 0), Some(21)); // EOF
+    }
+
+    // -------------------------------------------------------------------------
+    // looks_like_json tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_looks_like_json_object() {
+        assert!(looks_like_json(r#"{"key": "value"}"#));
+        assert!(looks_like_json(r#"  {"key": "value"}  "#)); // With whitespace
+    }
+
+    #[test]
+    fn test_looks_like_json_array() {
+        assert!(looks_like_json(r#"[1, 2, 3]"#));
+        assert!(looks_like_json(r#"  [1, 2, 3]  "#));
+    }
+
+    #[test]
+    fn test_looks_like_json_not_json() {
+        assert!(!looks_like_json("hello world"));
+        assert!(!looks_like_json("123"));
+        assert!(!looks_like_json("{incomplete"));
+        assert!(!looks_like_json("[incomplete"));
+    }
+
+    // -------------------------------------------------------------------------
+    // truncate_for_display tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_truncate_short_string() {
+        let short = "hello";
+        let result = truncate_for_display(short);
+        assert_eq!(result.as_ref(), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long_string() {
+        let long = "a".repeat(300);
+        let result = truncate_for_display(&long);
+        assert!(result.len() <= MAX_DISPLAY_LEN + 3); // +3 for "…"
+        assert!(result.ends_with('…'));
+    }
+
+    // -------------------------------------------------------------------------
+    // format_number tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_format_number() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(999), "999");
+        assert_eq!(format_number(1000), "1,000");
+        assert_eq!(format_number(1000000), "1,000,000");
+        assert_eq!(format_number(1234567), "1,234,567");
+    }
+
+    // -------------------------------------------------------------------------
+    // format_json tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_format_json_valid() {
+        let json = r#"{"name":"John","age":30}"#;
+        let result = format_json(json);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("\"name\": \"John\""));
+    }
+
+    #[test]
+    fn test_format_json_invalid() {
+        assert!(format_json("not json").is_none());
+        assert!(format_json("{incomplete").is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // is_newer_version tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_is_newer_version() {
+        assert!(is_newer_version("0.4.0", "0.3.2"));
+        assert!(is_newer_version("1.0.0", "0.9.9"));
+        assert!(is_newer_version("0.3.10", "0.3.9"));
+        assert!(!is_newer_version("0.3.2", "0.3.2")); // Same version
+        assert!(!is_newer_version("0.3.1", "0.3.2")); // Older version
+        assert!(!is_newer_version("0.2.0", "0.3.0")); // Older major
+    }
 }
