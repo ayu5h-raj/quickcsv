@@ -2008,8 +2008,8 @@ impl eframe::App for FastCsvApp {
                                     .on_hover_text("Opens Terminal to run: brew update && brew upgrade")
                                     .clicked()
                                 {
-                                    // Open Terminal and run commands
-                                    let script = "tell application \"Terminal\" to do script \"brew update && brew upgrade --cask quickcsv\"";
+                                    // Open Terminal and run commands (update, upgrade, and restart app)
+                                    let script = "tell application \"Terminal\" to do script \"brew update && brew upgrade --cask quickcsv && open -a QuickCSV\"";
                                     let _ = std::process::Command::new("osascript")
                                         .arg("-e")
                                         .arg(script)
