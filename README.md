@@ -12,7 +12,8 @@ A blazing-fast CSV viewer for macOS that handles files from 100MB to 2GB+ with z
 - 📊 **Handle Massive Files** - 100MB to 2GB+ with smooth scrolling
 - ⚡ **Virtualized Table** - Only visible rows are rendered
 - 🔍 **Fast Search** - Search millions of rows without freezing
-- 📄 **JSON Viewer** - Double-click JSON cells to view formatted content
+- � **Auto-Detect Delimiter** - Supports CSV, TSV, semicolon, and pipe-delimited files
+- �📄 **JSON Viewer** - Double-click JSON cells to view formatted content
 - 🔢 **Row Numbers** - See row numbers at a glance
 - 🎯 **Go to Row** - Jump to any row instantly (⌘L)
 - 🔄 **Update Notifications** - Know when a new version is available
