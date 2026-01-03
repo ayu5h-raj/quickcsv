@@ -2014,6 +2014,9 @@ impl eframe::App for FastCsvApp {
                                         .arg("-e")
                                         .arg(script)
                                         .spawn();
+                                    
+                                    // Close this instance so it can be overwritten and restarted
+                                    std::process::exit(0);
                                 }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
