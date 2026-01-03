@@ -16,15 +16,29 @@ A blazing-fast CSV viewer for macOS that handles files from 100MB to 2GB+ with z
 - 🎨 **Native macOS Look** - Dark theme, native file dialogs
 - 📁 **Drag & Drop** - Just drop your CSV file
 
-## Download
+## Installation
 
-Download the latest `QuickCSV.app` from the [Releases page](../../releases).
+### Homebrew (Recommended)
+
+```bash
+brew tap ayu5h-raj/tap
+brew install --cask quickcsv
+```
+
+**Upgrade:**
+```bash
+brew upgrade --cask quickcsv
+```
+
+### Manual Download
+
+Download the latest `QuickCSV.app` from the [Releases page](https://github.com/ayu5h-raj/quickcsv/releases).
 
 ## Build from Source
 
 ```bash
 # Clone the repo
-git clone https://github.com/AyushRaj4/quickcsv.git
+git clone https://github.com/ayu5h-raj/quickcsv.git
 cd quickcsv
 
 # Build and run
