@@ -2003,16 +2003,12 @@ impl eframe::App for FastCsvApp {
                                     .color(Color32::WHITE),
                                 );
                                 ui.add_space(10.0);
-                                if ui
-                                    .add(egui::Button::new("Copy Upgrade Command").small())
-                                    .on_hover_text("Copy: brew upgrade --cask quickcsv")
-                                    .clicked()
-                                {
-                                    // Copy command to clipboard
-                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                        let _ = clipboard.set_text("brew upgrade --cask quickcsv");
-                                    }
-                                }
+                                ui.label(egui::RichText::new("Run:").size(13.0));
+                                ui.label(
+                                    egui::RichText::new("brew upgrade --cask quickcsv")
+                                        .code()
+                                        .color(Color32::from_rgb(200, 220, 200)),
+                                );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
