@@ -26,3 +26,6 @@
 *.csv
 
 .cursor/
+
+# Agent instructions (private)
+agent-instructions.md
