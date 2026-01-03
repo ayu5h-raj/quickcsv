@@ -2003,12 +2003,18 @@ impl eframe::App for FastCsvApp {
                                     .color(Color32::WHITE),
                                 );
                                 ui.add_space(10.0);
-                                ui.label(egui::RichText::new("Run:").size(13.0));
-                                ui.label(
-                                    egui::RichText::new("brew upgrade --cask quickcsv")
-                                        .code()
-                                        .color(Color32::from_rgb(200, 220, 200)),
-                                );
+                                if ui
+                                    .add(egui::Button::new("Update in Terminal").small())
+                                    .on_hover_text("Opens Terminal to run: brew update && brew upgrade")
+                                    .clicked()
+                                {
+                                    // Open Terminal and run commands
+                                    let script = "tell application \"Terminal\" to do script \"brew update && brew upgrade --cask quickcsv\"";
+                                    let _ = std::process::Command::new("osascript")
+                                        .arg("-e")
+                                        .arg(script)
+                                        .spawn();
+                                }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
