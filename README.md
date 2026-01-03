@@ -25,6 +25,11 @@ brew tap ayu5h-raj/tap
 brew install --cask quickcsv
 ```
 
+**Upgrade:**
+```bash
+brew upgrade --cask quickcsv
+```
+
 ### Manual Download
 
 Download the latest `QuickCSV.app` from the [Releases page](https://github.com/ayu5h-raj/quickcsv/releases).
