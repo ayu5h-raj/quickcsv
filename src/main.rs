@@ -1380,10 +1380,10 @@ impl FastCsvApp {
                     // Right-aligned content type badge (only show for JSON)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if is_valid {
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(Color32::from_rgb(30, 70, 40))
-                                .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::symmetric(8, 4))
                                 .show(ui, |ui| {
                                     ui.label(
                                         egui::RichText::new("JSON")
@@ -1405,9 +1405,9 @@ impl FastCsvApp {
                 ui.add_space(8.0);
 
                 // JSON content area with distinct background
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(Color32::from_rgb(25, 25, 30))
-                    .rounding(6.0)
+                    .corner_radius(egui::CornerRadius::same(6))
                     .inner_margin(12.0)
                     .stroke(egui::Stroke::new(1.0, Color32::from_rgb(50, 50, 60)))
                     .show(ui, |ui| {
@@ -1680,11 +1680,11 @@ impl FastCsvApp {
                             let is_large = field.len() > 200;
                             let is_json = looks_like_json(field);
 
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(Color32::from_rgb(30, 30, 35))
-                                .rounding(4.0)
+                                .corner_radius(egui::CornerRadius::same(4))
                                 .inner_margin(8.0)
-                                .outer_margin(egui::Margin::symmetric(0.0, 2.0))
+                                .outer_margin(egui::Margin::symmetric(0, 2))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         // Column name
@@ -1881,10 +1881,10 @@ impl eframe::App for FastCsvApp {
 
         // Top panel with menu/toolbar
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
+            egui::MenuBar::new().ui(ui, |ui: &mut egui::Ui| {
+                ui.menu_button("File", |ui: &mut egui::Ui| {
                     if ui.button("Open...").clicked() {
-                        ui.close_menu();
+                        ui.close();
                         self.open_file(ctx);
                     }
                     ui.separator();
@@ -1892,9 +1892,9 @@ impl eframe::App for FastCsvApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-                ui.menu_button("Edit", |ui| {
+                ui.menu_button("Edit", |ui: &mut egui::Ui| {
                     if ui.button("Find... (⌘F)").clicked() {
-                        ui.close_menu();
+                        ui.close();
                         self.search.visible = true;
                         self.search.focus_input = true;
                     }
@@ -1903,25 +1903,25 @@ impl eframe::App for FastCsvApp {
                         .add_enabled(has_nav_rows, egui::Button::new("Find Next (F3)"))
                         .clicked()
                     {
-                        ui.close_menu();
+                        ui.close();
                         self.next_match();
                     }
                     if ui
                         .add_enabled(has_nav_rows, egui::Button::new("Find Previous (⇧F3)"))
                         .clicked()
                     {
-                        ui.close_menu();
+                        ui.close();
                         self.prev_match();
                     }
                     ui.separator();
                     if ui.button("Go to Row... (⌘L)").clicked() {
-                        ui.close_menu();
+                        ui.close();
                         self.go_to_row.open = true;
                         self.go_to_row.focus_input = true;
                         self.go_to_row.input.clear();
                     }
                 });
-                ui.menu_button("View", |ui| {
+                ui.menu_button("View", |ui: &mut egui::Ui| {
                     let theme_label = if self.dark_mode {
                         "☀ Light Mode"
                     } else {
@@ -1940,7 +1940,7 @@ impl eframe::App for FastCsvApp {
                             light.widgets.noninteractive.bg_fill = Color32::from_rgb(245, 245, 248);
                             ctx.set_visuals(light);
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
             });
@@ -1963,7 +1963,7 @@ impl eframe::App for FastCsvApp {
             egui::TopBottomPanel::top("update_banner")
                 .exact_height(32.0)
                 .show(ctx, |ui| {
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(Color32::from_rgb(40, 80, 40))
                         .show(ui, |ui| {
                             ui.horizontal_centered(|ui| {
@@ -2480,33 +2480,29 @@ fn check_for_updates(
         // Call GitHub API to get latest release
         let url = "https://api.github.com/repos/ayu5h-raj/quickcsv/releases/latest";
 
-        match ureq::get(url)
-            .set("User-Agent", "QuickCSV-Update-Checker")
-            .call()
-        {
-            Ok(response) => {
-                if let Ok(body) = response.into_string() {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
-                            // Remove 'v' prefix if present
-                            let version = tag.trim_start_matches('v');
+        let result = ureq::get(url)
+            .header("User-Agent", "QuickCSV-Update-Checker")
+            .call();
 
-                            // Compare versions
-                            if version != CURRENT_VERSION
-                                && is_newer_version(version, CURRENT_VERSION)
-                            {
-                                *latest_version.write() = Some(version.to_string());
-                                update_available.store(true, Ordering::SeqCst);
-                                ctx.request_repaint();
-                            }
+        if let Ok(response) = result {
+            if let Ok(body) = response.into_body().read_to_string() {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                        // Remove 'v' prefix if present
+                        let version = tag.trim_start_matches('v');
+
+                        // Compare versions
+                        if version != CURRENT_VERSION && is_newer_version(version, CURRENT_VERSION)
+                        {
+                            *latest_version.write() = Some(version.to_string());
+                            update_available.store(true, Ordering::SeqCst);
+                            ctx.request_repaint();
                         }
                     }
                 }
             }
-            Err(_) => {
-                // Silently fail - don't bother user if update check fails
-            }
         }
+        // Silently fail if update check fails
     });
 }
 
@@ -2543,6 +2539,11 @@ fn main() -> eframe::Result<()> {
         "QuickCSV",
         options,
         Box::new(|cc| {
+            // Add Phosphor icons to fonts
+            let mut fonts = egui::FontDefinitions::default();
+            egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+            cc.egui_ctx.set_fonts(fonts);
+
             // Follow system theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
