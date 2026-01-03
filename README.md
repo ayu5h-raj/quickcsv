@@ -28,10 +28,17 @@ brew tap ayu5h-raj/tap
 brew install --cask quickcsv
 ```
 
-**Upgrade:**
+**Check installed version:**
 ```bash
-brew upgrade --cask quickcsv
+brew info --cask quickcsv
 ```
+
+**Upgrade to latest version:**
+```bash
+brew update && brew upgrade --cask quickcsv
+```
+
+> **Note:** `brew update` is required first to fetch the latest cask definitions from the tap.
 
 ### Manual Download
 
