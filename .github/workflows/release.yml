@@ -60,10 +60,17 @@ jobs:
             A blazing-fast CSV viewer for macOS that handles files from 100MB to 2GB+ with zero lag.
             
             ### Installation
+            
+            **Homebrew (Recommended)**
+            ```bash
+            brew tap ayu5h-raj/tap
+            brew install --cask quickcsv
+            ```
+            
+            **Manual Download**
             1. Download `QuickCSV-${{ github.ref_name }}-macos.zip`
-            2. Unzip the file
-            3. Drag `QuickCSV.app` to your Applications folder
-            4. Right-click and select "Open" (first time only, to bypass Gatekeeper)
+            2. Unzip and drag `QuickCSV.app` to Applications
+            3. Right-click and select "Open" (first time only)
             
             ### Features
             - 🚀 Instant file opening with memory-mapped I/O
@@ -74,3 +81,63 @@ jobs:
             QuickCSV-${{ github.ref_name }}-macos.zip
           draft: false
           prerelease: false
+
+  update-homebrew:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Homebrew Tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          # Remove 'v' prefix for cask version
+          CASK_VERSION="${VERSION#v}"
+          
+          # Download the release zip and calculate SHA256
+          curl -sL "https://github.com/ayu5h-raj/quickcsv/releases/download/${VERSION}/QuickCSV-${VERSION}-macos.zip" -o quickcsv.zip
+          SHA256=$(shasum -a 256 quickcsv.zip | cut -d' ' -f1)
+          
+          echo "Version: $CASK_VERSION"
+          echo "SHA256: $SHA256"
+          
+          # Clone homebrew-tap repo
+          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/ayu5h-raj/homebrew-tap.git
+          cd homebrew-tap
+          
+          # Update the cask file
+          cat > Casks/quickcsv.rb << 'CASKEOF'
+cask "quickcsv" do
+  version "CASK_VERSION_PLACEHOLDER"
+  sha256 "SHA256_PLACEHOLDER"
+
+  url "https://github.com/ayu5h-raj/quickcsv/releases/download/v#{version}/QuickCSV-v#{version}-macos.zip"
+  name "QuickCSV"
+  desc "High-performance CSV viewer for macOS"
+  homepage "https://github.com/ayu5h-raj/quickcsv"
+
+  # Remove quarantine attribute (app is not code-signed)
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-cr", "#{appdir}/QuickCSV.app"],
+                   sudo: false
+  end
+
+  app "QuickCSV.app"
+
+  zap trash: [
+    "~/Library/Saved Application State/com.quickcsv.savedState",
+  ]
+end
+CASKEOF
+          
+          # Replace placeholders with actual values
+          sed -i "s/CASK_VERSION_PLACEHOLDER/${CASK_VERSION}/" Casks/quickcsv.rb
+          sed -i "s/SHA256_PLACEHOLDER/${SHA256}/" Casks/quickcsv.rb
+          
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/quickcsv.rb
+          git commit -m "Update QuickCSV to ${VERSION}"
+          git push
