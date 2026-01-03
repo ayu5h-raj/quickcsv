@@ -10,7 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  format:
+    name: Check Formatting
     runs-on: macos-latest
     steps:
       - name: Checkout code
@@ -19,7 +20,22 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  lint:
+    name: Clippy Lint
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -32,14 +48,54 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Check formatting
-        run: cargo fmt -- --check
-
       - name: Run clippy
         run: cargo clippy -- -D warnings
 
-      - name: Build
-        run: cargo build --release
+  test:
+    name: Run Tests
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --release
+        run: cargo test --release --verbose
+
+  build:
+    name: Build
+    runs-on: macos-latest
+    needs: [format, lint, test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release
+        run: cargo build --release
