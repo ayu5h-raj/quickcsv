@@ -300,6 +300,21 @@ struct GoToRowState {
     highlight_row: Option<usize>,
 }
 
+/// Row detail popup state
+#[derive(Default)]
+struct RowDetailState {
+    /// Whether the popup is open
+    open: bool,
+    /// Row index being displayed
+    row_index: usize,
+    /// Parsed fields for this row
+    fields: Vec<String>,
+    /// Column headers
+    headers: Vec<String>,
+    /// Which fields are expanded (for large values)
+    expanded_fields: std::collections::HashSet<usize>,
+}
+
 /// Update checker state
 struct UpdateState {
     /// Latest version available (if checked)
@@ -347,6 +362,8 @@ struct FastCsvApp {
     sort_state: SortState,
     /// Go to row dialog state
     go_to_row: GoToRowState,
+    /// Row detail popup state
+    row_detail: RowDetailState,
     /// Update checker state
     update_state: UpdateState,
 }
@@ -365,6 +382,7 @@ impl Default for FastCsvApp {
             dark_mode: true, // Default to dark mode
             sort_state: SortState::default(),
             go_to_row: GoToRowState::default(),
+            row_detail: RowDetailState::default(),
             update_state: UpdateState::default(),
         }
     }
@@ -1010,6 +1028,8 @@ impl FastCsvApp {
 
                 // Track which column header was clicked for sorting
                 let mut clicked_column: Option<usize> = None;
+                // Track which row's detail popup should be opened
+                let mut row_to_open_detail: Option<usize> = None;
                 let current_sort_col = self.sort_state.column;
                 let current_sort_dir = self.sort_state.direction;
                 let is_sorting = self.sort_state.is_sorting.load(Ordering::Relaxed);
@@ -1100,21 +1120,30 @@ impl FastCsvApp {
                             let is_goto_highlighted = self.go_to_row.highlight_row == Some(actual_row_idx);
 
                             // Row number column (1-indexed, shows actual row number)
+                            // Double-click to open row detail popup
+                            let row_idx_for_detail = actual_row_idx;
                                 row.col(|ui| {
                                 // Highlight background for "Go to Row" target
                                 if is_goto_highlighted {
                                     let rect = ui.available_rect_before_wrap();
                                     ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(60, 100, 140));
                                 }
-                                ui.label(
-                                    egui::RichText::new(format_number(actual_row_idx + 1))
-                                        .color(if is_goto_highlighted {
-                                            Color32::WHITE
-                                        } else {
-                                            Color32::from_rgb(140, 140, 140)
-                                        })
-                                        .small(),
+                                let response = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format_number(actual_row_idx + 1))
+                                            .color(if is_goto_highlighted {
+                                                Color32::WHITE
+                                            } else {
+                                                Color32::from_rgb(140, 140, 140)
+                                            })
+                                            .small(),
+                                    )
+                                    .sense(egui::Sense::click()),
                                 );
+                                if response.double_clicked() {
+                                    row_to_open_detail = Some(row_idx_for_detail);
+                                }
+                                response.on_hover_text("Double-click to view row details");
                             });
 
                             // Render each cell with ON-THE-FLY search highlighting
@@ -1234,6 +1263,11 @@ impl FastCsvApp {
                 // Handle column header click for sorting (after table is built)
                 if let Some(col_idx) = clicked_column {
                     self.sort_by_column(col_idx, ui.ctx());
+                }
+
+                // Handle row number double-click for row detail popup
+                if let Some(row_idx) = row_to_open_detail {
+                    self.open_row_detail(row_idx);
                 }
             }); // End of horizontal scroll area
 
@@ -1525,6 +1559,276 @@ impl FastCsvApp {
             self.go_to_row.open = false;
         }
     }
+
+    /// Open row detail popup for a specific row
+    fn open_row_detail(&mut self, row_index: usize) {
+        // Get the row data and headers
+        let (fields, headers) = {
+            let state = self.state.read();
+            if let Some(csv) = &state.csv {
+                let fields = csv.parse_row(row_index).unwrap_or_default();
+                let headers = csv.headers.clone();
+                (fields, headers)
+            } else {
+                return;
+            }
+        };
+
+        self.row_detail.open = true;
+        self.row_detail.row_index = row_index;
+        self.row_detail.fields = fields;
+        self.row_detail.headers = headers;
+        self.row_detail.expanded_fields.clear();
+    }
+
+    /// Render the row detail popup
+    fn render_row_detail_popup(&mut self, ctx: &egui::Context) {
+        if !self.row_detail.open {
+            return;
+        }
+
+        // Handle Escape to close
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.row_detail.open = false;
+            return;
+        }
+
+        let row_num = format_number(self.row_detail.row_index + 1);
+        let num_fields = self.row_detail.fields.len();
+
+        let mut should_close = false;
+        let mut open_json_for: Option<(usize, String, String)> = None;
+        let mut toggle_expand: Option<usize> = None;
+
+        egui::Window::new(format!("📋 Row {} Details", row_num))
+            .default_size([600.0, 500.0])
+            .min_size([400.0, 300.0])
+            .resizable(true)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+
+                // Header info bar
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} columns", num_fields))
+                            .color(Color32::from_rgb(150, 150, 150)),
+                    );
+
+                    // Copy buttons on the right
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("📋 Copy as CSV").clicked() {
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                let csv_row = self
+                                    .row_detail
+                                    .fields
+                                    .iter()
+                                    .map(|f| {
+                                        if f.contains(',') || f.contains('"') || f.contains('\n') {
+                                            format!("\"{}\"", f.replace('"', "\"\""))
+                                        } else {
+                                            f.clone()
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                let _ = clipboard.set_text(&csv_row);
+                            }
+                        }
+
+                        if ui.button("📋 Copy as JSON").clicked() {
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                let mut json_obj = serde_json::Map::new();
+                                for (i, field) in self.row_detail.fields.iter().enumerate() {
+                                    let header = self
+                                        .row_detail
+                                        .headers
+                                        .get(i)
+                                        .cloned()
+                                        .unwrap_or_else(|| format!("col_{}", i));
+                                    json_obj
+                                        .insert(header, serde_json::Value::String(field.clone()));
+                                }
+                                if let Ok(json_str) = serde_json::to_string_pretty(&json_obj) {
+                                    let _ = clipboard.set_text(&json_str);
+                                }
+                            }
+                        }
+                    });
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Scrollable field list
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(380.0)
+                    .show(ui, |ui| {
+                        for (i, field) in self.row_detail.fields.iter().enumerate() {
+                            let header = self
+                                .row_detail
+                                .headers
+                                .get(i)
+                                .cloned()
+                                .unwrap_or_else(|| format!("Column {}", i + 1));
+                            let is_expanded = self.row_detail.expanded_fields.contains(&i);
+                            let is_large = field.len() > 200;
+                            let is_json = looks_like_json(field);
+
+                            egui::Frame::none()
+                                .fill(Color32::from_rgb(30, 30, 35))
+                                .rounding(4.0)
+                                .inner_margin(8.0)
+                                .outer_margin(egui::Margin::symmetric(0.0, 2.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        // Column name
+                                        ui.label(
+                                            egui::RichText::new(&header)
+                                                .color(Color32::from_rgb(130, 180, 230))
+                                                .strong(),
+                                        );
+
+                                        // Show size for large values
+                                        if is_large {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "({} chars)",
+                                                    field.len()
+                                                ))
+                                                .color(Color32::from_rgb(100, 100, 100))
+                                                .size(11.0),
+                                            );
+                                        }
+
+                                        // Action buttons on the right
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                // Copy button
+                                                if ui
+                                                    .small_button("📋")
+                                                    .on_hover_text("Copy value")
+                                                    .clicked()
+                                                {
+                                                    if let Ok(mut clipboard) =
+                                                        arboard::Clipboard::new()
+                                                    {
+                                                        let _ = clipboard.set_text(field);
+                                                    }
+                                                }
+
+                                                // JSON button if it looks like JSON
+                                                if is_json
+                                                    && ui
+                                                        .small_button("📄")
+                                                        .on_hover_text("View as JSON")
+                                                        .clicked()
+                                                {
+                                                    open_json_for = Some((
+                                                        self.row_detail.row_index,
+                                                        header.clone(),
+                                                        field.clone(),
+                                                    ));
+                                                }
+
+                                                // Expand/collapse for large values
+                                                if is_large {
+                                                    let btn_text =
+                                                        if is_expanded { "▲" } else { "▼" };
+                                                    if ui
+                                                        .small_button(btn_text)
+                                                        .on_hover_text(if is_expanded {
+                                                            "Collapse"
+                                                        } else {
+                                                            "Expand"
+                                                        })
+                                                        .clicked()
+                                                    {
+                                                        toggle_expand = Some(i);
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+
+                                    ui.add_space(4.0);
+
+                                    // Value display
+                                    let display_value = if is_large && !is_expanded {
+                                        format!("{}...", &field[..field.len().min(200)])
+                                    } else {
+                                        field.clone()
+                                    };
+
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut display_value.as_str())
+                                            .font(egui::TextStyle::Monospace)
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(if is_large && is_expanded {
+                                                8
+                                            } else {
+                                                1
+                                            })
+                                            .interactive(false)
+                                            .text_color(Color32::from_rgb(200, 200, 210)),
+                                    );
+                                });
+                        }
+                    });
+
+                ui.add_space(8.0);
+
+                // Close button
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new("✕ Close")
+                                    .min_size([80.0, 28.0].into())
+                                    .fill(Color32::from_rgb(60, 60, 70)),
+                            )
+                            .clicked()
+                        {
+                            should_close = true;
+                        }
+                    });
+                });
+            });
+
+        // Handle toggle expand
+        if let Some(idx) = toggle_expand {
+            if self.row_detail.expanded_fields.contains(&idx) {
+                self.row_detail.expanded_fields.remove(&idx);
+            } else {
+                self.row_detail.expanded_fields.insert(idx);
+            }
+        }
+
+        // Handle opening JSON viewer
+        if let Some((row, col_name, value)) = open_json_for {
+            self.row_detail.open = false;
+            self.json_viewer.row = row;
+            self.json_viewer.col = 0;
+            self.json_viewer.column_name = col_name;
+            self.json_viewer.raw_content = value.clone();
+            if let Some(formatted) = format_json(&value) {
+                self.json_viewer.formatted_content = formatted;
+                self.json_viewer.is_valid_json = true;
+            } else {
+                self.json_viewer.formatted_content = value;
+                self.json_viewer.is_valid_json = false;
+            }
+            self.json_viewer.open = true;
+        }
+
+        if should_close {
+            self.row_detail.open = false;
+        }
+    }
 }
 
 impl eframe::App for FastCsvApp {
@@ -1770,6 +2074,9 @@ impl eframe::App for FastCsvApp {
 
         // Render Go to Row dialog (if open)
         self.render_go_to_row_dialog(ctx);
+
+        // Render Row Detail popup (if open)
+        self.render_row_detail_popup(ctx);
 
         // Handle dropped files
         ctx.input(|i| {
