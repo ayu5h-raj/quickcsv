@@ -282,6 +282,8 @@ struct GoToRowState {
     focus_input: bool,
     /// Row to scroll to (set when confirmed)
     scroll_to_row: Option<usize>,
+    /// Row to highlight (after jumping)
+    highlight_row: Option<usize>,
 }
 
 /// Update checker state
@@ -415,9 +417,9 @@ impl FastCsvApp {
             let result = init_csv_progressive(&path_clone, &state, &ctx);
 
             if let Err(e) = result {
-                let mut state_guard = state.write();
-                state_guard.load_state = LoadState::Error;
-                state_guard.error_message = Some(e);
+            let mut state_guard = state.write();
+                    state_guard.load_state = LoadState::Error;
+                    state_guard.error_message = Some(e);
                 ctx.request_repaint();
             }
         });
@@ -514,7 +516,7 @@ impl FastCsvApp {
                 if row_idx % 5000 == 0 {
                     let pct = (row_idx * 50) / rows_to_sort;
                     progress.store(pct, Ordering::Relaxed);
-                    ctx.request_repaint();
+            ctx.request_repaint();
                 }
             }
 
@@ -1071,7 +1073,7 @@ impl FastCsvApp {
                                     vec![]
                                 };
                                 drop(state);
-
+                                
                                 // Cache for next render
                                 self.row_cache.insert(actual_row_idx, fields.clone());
                                 fields
@@ -1080,11 +1082,23 @@ impl FastCsvApp {
                             // Check if this is the current navigation row (for special highlighting)
                             let is_current_nav_row = current_nav_row == Some(actual_row_idx);
 
+                            // Check if this row is highlighted from "Go to Row"
+                            let is_goto_highlighted = self.go_to_row.highlight_row == Some(actual_row_idx);
+
                             // Row number column (1-indexed, shows actual row number)
                                 row.col(|ui| {
+                                // Highlight background for "Go to Row" target
+                                if is_goto_highlighted {
+                                    let rect = ui.available_rect_before_wrap();
+                                    ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(60, 100, 140));
+                                }
                                 ui.label(
                                     egui::RichText::new(format_number(actual_row_idx + 1))
-                                        .color(Color32::from_rgb(140, 140, 140))
+                                        .color(if is_goto_highlighted {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgb(140, 140, 140)
+                                        })
                                         .small(),
                                 );
                             });
@@ -1107,6 +1121,7 @@ impl FastCsvApp {
                                     let display_text = truncate_for_display(field);
 
                                     // Create a clickable label
+                                    // Priority: search match > go-to-row highlight > JSON styling > default
                                     let response = if is_match && is_current_nav_row {
                                         // Current navigation row match - bright orange
                                         let rect = ui.available_rect_before_wrap();
@@ -1127,6 +1142,16 @@ impl FastCsvApp {
                                             )
                                             .sense(egui::Sense::click()),
                                         )
+                                    } else if is_goto_highlighted {
+                                        // Go-to-row highlight - blue background
+                                        let rect = ui.available_rect_before_wrap();
+                                        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(60, 100, 140));
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(display_text.as_ref()).color(Color32::WHITE),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
                                     } else if is_json {
                                         // JSON content - show with subtle indicator
                                         ui.add(
@@ -1139,6 +1164,11 @@ impl FastCsvApp {
                                     } else {
                                         ui.add(egui::Label::new(display_text.as_ref()).sense(egui::Sense::click()))
                                     };
+
+                                    // Handle click to clear go-to-row highlight
+                                    if response.clicked() {
+                                        self.go_to_row.highlight_row = None;
+                                    }
 
                                     // Handle double-click to open cell viewer (works for any cell)
                                     if response.double_clicked() {
@@ -1177,7 +1207,7 @@ impl FastCsvApp {
                                     }
                                 });
                             }
-
+                            
                             // Fill remaining columns if row has fewer fields than headers
                             for _ in fields.len()..num_columns {
                                 row.col(|ui| {
@@ -1207,16 +1237,16 @@ impl FastCsvApp {
         let state = self.state.read();
 
         ui.horizontal(|ui| match state.load_state {
-            LoadState::Empty => {
-                ui.label("No file loaded");
-            }
-            LoadState::Indexing => {
-                let rows = state.rows_indexed.load(Ordering::Relaxed);
-                ui.spinner();
-                ui.label(format!("Indexing... {} rows", format_number(rows)));
-            }
-            LoadState::Ready => {
-                if let Some(csv) = &state.csv {
+                LoadState::Empty => {
+                    ui.label("No file loaded");
+                }
+                LoadState::Indexing => {
+                    let rows = state.rows_indexed.load(Ordering::Relaxed);
+                    ui.spinner();
+                    ui.label(format!("Indexing... {} rows", format_number(rows)));
+                }
+                LoadState::Ready => {
+                    if let Some(csv) = &state.csv {
                     let row_count = csv.indexed_row_count();
                     let is_still_indexing = !state.indexing_complete.load(Ordering::Relaxed);
 
@@ -1226,20 +1256,20 @@ impl FastCsvApp {
                     } else {
                         ui.label(format!("Rows: {}", format_number(row_count)));
                     }
-                    ui.separator();
-                    ui.label(format!("Columns: {}", csv.headers.len()));
-                    ui.separator();
-                    ui.label(format!("Size: {}", format_file_size(csv.file_size)));
-                    ui.separator();
-                    ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
+                        ui.separator();
+                        ui.label(format!("Columns: {}", csv.headers.len()));
+                        ui.separator();
+                        ui.label(format!("Size: {}", format_file_size(csv.file_size)));
+                        ui.separator();
+                        ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
+                    }
                 }
-            }
-            LoadState::Error => {
-                ui.colored_label(
-                    egui::Color32::RED,
-                    state.error_message.as_deref().unwrap_or("Unknown error"),
-                );
-            }
+                LoadState::Error => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        state.error_message.as_deref().unwrap_or("Unknown error"),
+                    );
+                }
         });
     }
 
@@ -1467,7 +1497,9 @@ impl FastCsvApp {
             {
                 if row_num >= 1 && row_num <= total_rows {
                     // Convert to 0-indexed
-                    self.go_to_row.scroll_to_row = Some(row_num - 1);
+                    let row_idx = row_num - 1;
+                    self.go_to_row.scroll_to_row = Some(row_idx);
+                    self.go_to_row.highlight_row = Some(row_idx);
                     should_close = true;
                 }
             }
@@ -1758,7 +1790,7 @@ fn init_csv_progressive(
         unsafe { Mmap::map(&file) }.map_err(|e| format!("Failed to memory-map file: {e}"))?;
 
     let bytes = &mmap[..];
-
+    
     // Find the first row boundary (quote-aware) to get headers
     let first_row_end = find_row_boundary(bytes, 0).unwrap_or(bytes.len());
     // Strip trailing newline/CRLF for header parsing
@@ -1771,7 +1803,7 @@ fn init_csv_progressive(
             end -= 1;
         }
         end
-    } else {
+        } else {
         first_row_end
     };
 
@@ -1780,7 +1812,7 @@ fn init_csv_progressive(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .from_reader(header_bytes);
-
+    
     let headers: Vec<String> = reader
         .records()
         .next()
@@ -2103,7 +2135,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             // Follow system theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-
+            
             Ok(Box::new(FastCsvApp::default()))
         }),
     )
