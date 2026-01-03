@@ -119,31 +119,28 @@ jobs:
           git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/ayu5h-raj/homebrew-tap.git
           cd homebrew-tap
           
-          # Update the cask file
-          cat > Casks/quickcsv.rb << 'CASKEOF'
-cask "quickcsv" do
-  version "CASK_VERSION_PLACEHOLDER"
-  sha256 "SHA256_PLACEHOLDER"
-
-  url "https://github.com/ayu5h-raj/quickcsv/releases/download/v#{version}/QuickCSV-v#{version}-macos.zip"
-  name "QuickCSV"
-  desc "High-performance CSV viewer for macOS"
-  homepage "https://github.com/ayu5h-raj/quickcsv"
-
-  # Remove quarantine attribute (app is not code-signed)
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: ["-cr", "#{appdir}/QuickCSV.app"],
-                   sudo: false
-  end
-
-  app "QuickCSV.app"
-
-  zap trash: [
-    "~/Library/Saved Application State/com.quickcsv.savedState",
-  ]
-end
-CASKEOF
+          # Update the cask file using printf to avoid heredoc issues
+          printf '%s\n' 'cask "quickcsv" do' > Casks/quickcsv.rb
+          printf '%s\n' '  version "CASK_VERSION_PLACEHOLDER"' >> Casks/quickcsv.rb
+          printf '%s\n' '  sha256 "SHA256_PLACEHOLDER"' >> Casks/quickcsv.rb
+          printf '%s\n' '' >> Casks/quickcsv.rb
+          printf '%s\n' '  url "https://github.com/ayu5h-raj/quickcsv/releases/download/v#{version}/QuickCSV-v#{version}-macos.zip"' >> Casks/quickcsv.rb
+          printf '%s\n' '  name "QuickCSV"' >> Casks/quickcsv.rb
+          printf '%s\n' '  desc "High-performance CSV viewer for macOS"' >> Casks/quickcsv.rb
+          printf '%s\n' '  homepage "https://github.com/ayu5h-raj/quickcsv"' >> Casks/quickcsv.rb
+          printf '%s\n' '' >> Casks/quickcsv.rb
+          printf '%s\n' '  postflight do' >> Casks/quickcsv.rb
+          printf '%s\n' '    system_command "/usr/bin/xattr",' >> Casks/quickcsv.rb
+          printf '%s\n' '                   args: ["-cr", "#{appdir}/QuickCSV.app"],' >> Casks/quickcsv.rb
+          printf '%s\n' '                   sudo: false' >> Casks/quickcsv.rb
+          printf '%s\n' '  end' >> Casks/quickcsv.rb
+          printf '%s\n' '' >> Casks/quickcsv.rb
+          printf '%s\n' '  app "QuickCSV.app"' >> Casks/quickcsv.rb
+          printf '%s\n' '' >> Casks/quickcsv.rb
+          printf '%s\n' '  zap trash: [' >> Casks/quickcsv.rb
+          printf '%s\n' '    "~/Library/Saved Application State/com.quickcsv.savedState",' >> Casks/quickcsv.rb
+          printf '%s\n' '  ]' >> Casks/quickcsv.rb
+          printf '%s\n' 'end' >> Casks/quickcsv.rb
           
           # Replace placeholders with actual values
           sed -i "s/CASK_VERSION_PLACEHOLDER/${CASK_VERSION}/" Casks/quickcsv.rb
