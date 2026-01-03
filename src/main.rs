@@ -1051,8 +1051,12 @@ impl FastCsvApp {
                                         format!(" ({sort_progress}%)")
                                     } else {
                                         match current_sort_dir {
-                                            SortDirection::Ascending => " (asc)".to_string(),
-                                            SortDirection::Descending => " (desc)".to_string(),
+                                            SortDirection::Ascending => {
+                                                format!(" {}", egui_phosphor::regular::ARROW_UP)
+                                            }
+                                            SortDirection::Descending => {
+                                                format!(" {}", egui_phosphor::regular::ARROW_DOWN)
+                                            }
                                             SortDirection::None => String::new(),
                                         }
                                     }
