@@ -1526,11 +1526,24 @@ fn init_csv_progressive(
 
     let bytes = &mmap[..];
 
-    // Find the first newline to get headers
-    let first_newline = memchr::memchr(b'\n', bytes).unwrap_or(bytes.len());
+    // Find the first row boundary (quote-aware) to get headers
+    let first_row_end = find_row_boundary(bytes, 0).unwrap_or(bytes.len());
+    // Strip trailing newline/CRLF for header parsing
+    let header_end = if first_row_end > 0 && first_row_end <= bytes.len() {
+        let mut end = first_row_end;
+        if end > 0 && bytes.get(end - 1) == Some(&b'\n') {
+            end -= 1;
+        }
+        if end > 0 && bytes.get(end - 1) == Some(&b'\r') {
+            end -= 1;
+        }
+        end
+    } else {
+        first_row_end
+    };
 
     // Parse headers from first row
-    let header_bytes = &bytes[0..first_newline];
+    let header_bytes = &bytes[0..header_end];
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .from_reader(header_bytes);
@@ -1543,7 +1556,7 @@ fn init_csv_progressive(
         .unwrap_or_else(|| vec!["Column".to_string()]);
 
     // Create shared row_offsets with just the header and first data row
-    let row_offsets = Arc::new(RwLock::new(vec![0, first_newline + 1]));
+    let row_offsets = Arc::new(RwLock::new(vec![0, first_row_end]));
 
     // Create MappedCsv immediately so UI can show data
     let mapped_csv = MappedCsv {
@@ -1573,7 +1586,7 @@ fn init_csv_progressive(
     let state_clone = Arc::clone(state);
     let ctx_clone = ctx.clone();
     let path_clone = path.clone();
-    let start_offset = first_newline + 1;
+    let start_offset = first_row_end;
 
     thread::spawn(move || {
         // Re-open and map the file for indexing (UI uses its own map)
@@ -1618,11 +1631,16 @@ fn init_csv_progressive(
                 }
             }
 
-            // Find next newline
-            if let Some(pos) = memchr::memchr(b'\n', &bytes[offset..]) {
-                offset += pos + 1;
-                if offset < bytes.len() {
-                    batch_offsets.push(offset);
+            // Find next row boundary (quote-aware for RFC 4180 compliance)
+            if let Some(next_offset) = find_row_boundary(bytes, offset) {
+                if next_offset > offset && next_offset < bytes.len() {
+                    batch_offsets.push(next_offset);
+                }
+                offset = next_offset;
+
+                // If we're at EOF, stop
+                if offset >= bytes.len() {
+                    break;
                 }
 
                 // Batch update every 10000 rows for better performance
@@ -1689,6 +1707,48 @@ fn looks_like_json(s: &str) -> bool {
     let trimmed = s.trim();
     (trimmed.starts_with('{') && trimmed.ends_with('}'))
         || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+}
+
+/// Find the next row boundary in CSV data, respecting quoted fields.
+///
+/// RFC 4180 compliant: newlines inside quoted fields are NOT row boundaries.
+/// Handles escaped quotes ("") correctly by toggle-counting.
+///
+/// Returns the byte offset of the start of the next row, or None if no more rows.
+fn find_row_boundary(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut in_quotes = false;
+    let mut i = start;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                // Toggle quote state. For escaped quotes (""), this toggles twice,
+                // which correctly maintains the quote state.
+                in_quotes = !in_quotes;
+            }
+            b'\n' if !in_quotes => {
+                // Found a row boundary (newline outside of quotes)
+                return Some(i + 1);
+            }
+            b'\r' if !in_quotes => {
+                // Handle CRLF: if next char is \n, skip both
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    return Some(i + 2);
+                }
+                // Standalone \r (old Mac format) - treat as row boundary
+                return Some(i + 1);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // No more newlines found - if we're past the start and at EOF, that's the last row
+    if i > start {
+        Some(i)
+    } else {
+        None
+    }
 }
 
 /// Try to parse and format JSON, returns None if invalid
