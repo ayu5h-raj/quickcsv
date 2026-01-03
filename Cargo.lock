@@ -2586,6 +2586,7 @@ dependencies = [
  "egui-phosphor",
  "egui_extras",
  "humansize",
+ "image",
  "memchr",
  "memmap2",
  "parking_lot",

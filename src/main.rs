@@ -4,6 +4,7 @@
 //! with zero lag. Uses memmap2 for zero-copy file loading and egui for the UI.
 
 use eframe::egui::{self, Color32, Key};
+
 use memmap2::Mmap;
 use parking_lot::RwLock;
 use std::fs::File;
@@ -2550,12 +2551,31 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
     latest_parts.len() > current_parts.len()
 }
 
+fn load_icon() -> egui::IconData {
+    let (icon_rgba, icon_width, icon_height) = {
+        let icon_bytes = include_bytes!("../icons/icon-128.png");
+        let image = image::load_from_memory(icon_bytes)
+            .expect("Failed to load icon")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        (image.into_vec(), width, height)
+    };
+
+    egui::IconData {
+        rgba: icon_rgba,
+        width: icon_width,
+        height: icon_height,
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    let icon = load_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([600.0, 400.0])
             .with_title("QuickCSV")
+            .with_icon(icon)
             .with_drag_and_drop(true),
         ..Default::default()
     };
