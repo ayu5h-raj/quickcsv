@@ -4,6 +4,7 @@
 //! with zero lag. Uses memmap2 for zero-copy file loading and egui for the UI.
 
 use eframe::egui::{self, Color32, Key};
+
 use memmap2::Mmap;
 use parking_lot::RwLock;
 use std::fs::File;
@@ -936,7 +937,7 @@ impl FastCsvApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("✕").clicked() {
+                if ui.button(egui_phosphor::regular::X).clicked() {
                     self.search.cancel_flag.store(true, Ordering::SeqCst);
                     self.search.visible = false;
                     self.search.query.clear();
@@ -1051,8 +1052,12 @@ impl FastCsvApp {
                                         format!(" ({sort_progress}%)")
                                     } else {
                                         match current_sort_dir {
-                                            SortDirection::Ascending => " (asc)".to_string(),
-                                            SortDirection::Descending => " (desc)".to_string(),
+                                            SortDirection::Ascending => {
+                                                format!(" {}", egui_phosphor::regular::ARROW_UP)
+                                            }
+                                            SortDirection::Descending => {
+                                                format!(" {}", egui_phosphor::regular::ARROW_DOWN)
+                                            }
                                             SortDirection::None => String::new(),
                                         }
                                     }
@@ -1380,10 +1385,10 @@ impl FastCsvApp {
                     // Right-aligned content type badge (only show for JSON)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if is_valid {
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(Color32::from_rgb(30, 70, 40))
-                                .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::symmetric(8, 4))
                                 .show(ui, |ui| {
                                     ui.label(
                                         egui::RichText::new("JSON")
@@ -1405,9 +1410,9 @@ impl FastCsvApp {
                 ui.add_space(8.0);
 
                 // JSON content area with distinct background
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(Color32::from_rgb(25, 25, 30))
-                    .rounding(6.0)
+                    .corner_radius(egui::CornerRadius::same(6))
                     .inner_margin(12.0)
                     .stroke(egui::Stroke::new(1.0, Color32::from_rgb(50, 50, 60)))
                     .show(ui, |ui| {
@@ -1432,7 +1437,13 @@ impl FastCsvApp {
                 ui.horizontal(|ui| {
                     // Copy buttons on the left
                     if ui
-                        .add(egui::Button::new("📋 Copy Formatted").min_size([120.0, 28.0].into()))
+                        .add(
+                            egui::Button::new(format!(
+                                "{} Copy Formatted",
+                                egui_phosphor::regular::COPY
+                            ))
+                            .min_size([140.0, 28.0].into()),
+                        )
                         .clicked()
                     {
                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
@@ -1443,7 +1454,13 @@ impl FastCsvApp {
                     ui.add_space(8.0);
 
                     if ui
-                        .add(egui::Button::new("📄 Copy Raw").min_size([100.0, 28.0].into()))
+                        .add(
+                            egui::Button::new(format!(
+                                "{} Copy Raw",
+                                egui_phosphor::regular::FILE_TEXT
+                            ))
+                            .min_size([120.0, 28.0].into()),
+                        )
                         .clicked()
                     {
                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
@@ -1455,7 +1472,7 @@ impl FastCsvApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new("✕ Close")
+                                egui::Button::new(format!("{} Close", egui_phosphor::regular::X))
                                     .min_size([80.0, 28.0].into())
                                     .fill(Color32::from_rgb(60, 60, 70)),
                             )
@@ -1620,7 +1637,10 @@ impl FastCsvApp {
 
                     // Copy buttons on the right
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("📋 Copy as CSV").clicked() {
+                        if ui
+                            .button(format!("{} Copy as CSV", egui_phosphor::regular::COPY))
+                            .clicked()
+                        {
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let csv_row = self
                                     .row_detail
@@ -1639,7 +1659,10 @@ impl FastCsvApp {
                             }
                         }
 
-                        if ui.button("📋 Copy as JSON").clicked() {
+                        if ui
+                            .button(format!("{} Copy as JSON", egui_phosphor::regular::CODE))
+                            .clicked()
+                        {
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let mut json_obj = serde_json::Map::new();
                                 for (i, field) in self.row_detail.fields.iter().enumerate() {
@@ -1680,11 +1703,11 @@ impl FastCsvApp {
                             let is_large = field.len() > 200;
                             let is_json = looks_like_json(field);
 
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(Color32::from_rgb(30, 30, 35))
-                                .rounding(4.0)
+                                .corner_radius(egui::CornerRadius::same(4))
                                 .inner_margin(8.0)
-                                .outer_margin(egui::Margin::symmetric(0.0, 2.0))
+                                .outer_margin(egui::Margin::symmetric(0, 2))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         // Column name
@@ -1712,7 +1735,7 @@ impl FastCsvApp {
                                             |ui| {
                                                 // Copy button
                                                 if ui
-                                                    .small_button("📋")
+                                                    .small_button(egui_phosphor::regular::COPY)
                                                     .on_hover_text("Copy value")
                                                     .clicked()
                                                 {
@@ -1726,7 +1749,7 @@ impl FastCsvApp {
                                                 // JSON button if it looks like JSON
                                                 if is_json
                                                     && ui
-                                                        .small_button("📄")
+                                                        .small_button(egui_phosphor::regular::CODE)
                                                         .on_hover_text("View as JSON")
                                                         .clicked()
                                                 {
@@ -1739,8 +1762,11 @@ impl FastCsvApp {
 
                                                 // Expand/collapse for large values
                                                 if is_large {
-                                                    let btn_text =
-                                                        if is_expanded { "▲" } else { "▼" };
+                                                    let btn_text = if is_expanded {
+                                                        egui_phosphor::regular::CARET_UP
+                                                    } else {
+                                                        egui_phosphor::regular::CARET_DOWN
+                                                    };
                                                     if ui
                                                         .small_button(btn_text)
                                                         .on_hover_text(if is_expanded {
@@ -1789,7 +1815,7 @@ impl FastCsvApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new("✕ Close")
+                                egui::Button::new(format!("{} Close", egui_phosphor::regular::X))
                                     .min_size([80.0, 28.0].into())
                                     .fill(Color32::from_rgb(60, 60, 70)),
                             )
@@ -1881,10 +1907,10 @@ impl eframe::App for FastCsvApp {
 
         // Top panel with menu/toolbar
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
+            egui::MenuBar::new().ui(ui, |ui: &mut egui::Ui| {
+                ui.menu_button("File", |ui: &mut egui::Ui| {
                     if ui.button("Open...").clicked() {
-                        ui.close_menu();
+                        ui.close();
                         self.open_file(ctx);
                     }
                     ui.separator();
@@ -1892,9 +1918,9 @@ impl eframe::App for FastCsvApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-                ui.menu_button("Edit", |ui| {
+                ui.menu_button("Edit", |ui: &mut egui::Ui| {
                     if ui.button("Find... (⌘F)").clicked() {
-                        ui.close_menu();
+                        ui.close();
                         self.search.visible = true;
                         self.search.focus_input = true;
                     }
@@ -1903,25 +1929,25 @@ impl eframe::App for FastCsvApp {
                         .add_enabled(has_nav_rows, egui::Button::new("Find Next (F3)"))
                         .clicked()
                     {
-                        ui.close_menu();
+                        ui.close();
                         self.next_match();
                     }
                     if ui
                         .add_enabled(has_nav_rows, egui::Button::new("Find Previous (⇧F3)"))
                         .clicked()
                     {
-                        ui.close_menu();
+                        ui.close();
                         self.prev_match();
                     }
                     ui.separator();
                     if ui.button("Go to Row... (⌘L)").clicked() {
-                        ui.close_menu();
+                        ui.close();
                         self.go_to_row.open = true;
                         self.go_to_row.focus_input = true;
                         self.go_to_row.input.clear();
                     }
                 });
-                ui.menu_button("View", |ui| {
+                ui.menu_button("View", |ui: &mut egui::Ui| {
                     let theme_label = if self.dark_mode {
                         "☀ Light Mode"
                     } else {
@@ -1940,7 +1966,7 @@ impl eframe::App for FastCsvApp {
                             light.widgets.noninteractive.bg_fill = Color32::from_rgb(245, 245, 248);
                             ctx.set_visuals(light);
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
             });
@@ -1963,7 +1989,7 @@ impl eframe::App for FastCsvApp {
             egui::TopBottomPanel::top("update_banner")
                 .exact_height(32.0)
                 .show(ctx, |ui| {
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(Color32::from_rgb(40, 80, 40))
                         .show(ui, |ui| {
                             ui.horizontal_centered(|ui| {
@@ -1991,7 +2017,7 @@ impl eframe::App for FastCsvApp {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.add_space(10.0);
-                                        if ui.small_button("✕").clicked() {
+                                        if ui.small_button(egui_phosphor::regular::X).clicked() {
                                             self.update_state.dismissed = true;
                                         }
                                     },
@@ -2480,33 +2506,29 @@ fn check_for_updates(
         // Call GitHub API to get latest release
         let url = "https://api.github.com/repos/ayu5h-raj/quickcsv/releases/latest";
 
-        match ureq::get(url)
-            .set("User-Agent", "QuickCSV-Update-Checker")
-            .call()
-        {
-            Ok(response) => {
-                if let Ok(body) = response.into_string() {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
-                            // Remove 'v' prefix if present
-                            let version = tag.trim_start_matches('v');
+        let result = ureq::get(url)
+            .header("User-Agent", "QuickCSV-Update-Checker")
+            .call();
 
-                            // Compare versions
-                            if version != CURRENT_VERSION
-                                && is_newer_version(version, CURRENT_VERSION)
-                            {
-                                *latest_version.write() = Some(version.to_string());
-                                update_available.store(true, Ordering::SeqCst);
-                                ctx.request_repaint();
-                            }
+        if let Ok(response) = result {
+            if let Ok(body) = response.into_body().read_to_string() {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                        // Remove 'v' prefix if present
+                        let version = tag.trim_start_matches('v');
+
+                        // Compare versions
+                        if version != CURRENT_VERSION && is_newer_version(version, CURRENT_VERSION)
+                        {
+                            *latest_version.write() = Some(version.to_string());
+                            update_available.store(true, Ordering::SeqCst);
+                            ctx.request_repaint();
                         }
                     }
                 }
             }
-            Err(_) => {
-                // Silently fail - don't bother user if update check fails
-            }
         }
+        // Silently fail if update check fails
     });
 }
 
@@ -2529,12 +2551,31 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
     latest_parts.len() > current_parts.len()
 }
 
+fn load_icon() -> egui::IconData {
+    let (icon_rgba, icon_width, icon_height) = {
+        let icon_bytes = include_bytes!("../icons/icon-128.png");
+        let image = image::load_from_memory(icon_bytes)
+            .expect("Failed to load icon")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        (image.into_vec(), width, height)
+    };
+
+    egui::IconData {
+        rgba: icon_rgba,
+        width: icon_width,
+        height: icon_height,
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    let icon = load_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([600.0, 400.0])
             .with_title("QuickCSV")
+            .with_icon(icon)
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -2543,6 +2584,11 @@ fn main() -> eframe::Result<()> {
         "QuickCSV",
         options,
         Box::new(|cc| {
+            // Add Phosphor icons to fonts
+            let mut fonts = egui::FontDefinitions::default();
+            egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+            cc.egui_ctx.set_fonts(fonts);
+
             // Follow system theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
