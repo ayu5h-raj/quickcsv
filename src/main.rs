@@ -2004,8 +2004,8 @@ impl eframe::App for FastCsvApp {
                                 );
                                 ui.add_space(10.0);
                                 if ui
-                                    .add(egui::Button::new("Update via Homebrew").small())
-                                    .on_hover_text("brew upgrade --cask quickcsv")
+                                    .add(egui::Button::new("Copy Upgrade Command").small())
+                                    .on_hover_text("Copy: brew upgrade --cask quickcsv")
                                     .clicked()
                                 {
                                     // Copy command to clipboard
@@ -2017,7 +2017,8 @@ impl eframe::App for FastCsvApp {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.add_space(10.0);
-                                        if ui.small_button(egui_phosphor::regular::X).clicked() {
+                                        // Use unicode X for guaranteed rendering
+                                        if ui.small_button("✕").clicked() {
                                             self.update_state.dismissed = true;
                                         }
                                     },
