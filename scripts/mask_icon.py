@@ -26,12 +26,21 @@ def add_corners(im, rad):
     bbox = im.getbbox()
     if bbox:
         im = im.crop(bbox)
-        # Resize back to original full size (or slightly smaller if we want safety value, but full is best for matching)
-        # We assume target is square.
-        im = im.resize((w, h), Image.Resampling.LANCZOS)
+        # Resize to 90% of the canvas to allow for standard visual margins/shadows
+        # Standard macOS icons often have a tiny bit of breathing room or shadow within the 1024 box.
+        target_size = int(min(w, h) * 0.90)
+        im = im.resize((target_size, target_size), Image.Resampling.LANCZOS)
+        
+        # Create a new blank image of full size
+        new_im = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+        # Paste centered
+        offset = ((w - target_size) // 2, (h - target_size) // 2)
+        new_im.paste(im, offset)
+        im = new_im
 
     # Now apply the soft rounded mask to ensure smooth edges
-    rad = int(min(im.size) * 0.175) # Recalculate radius based on new size (same)
+    # Standard macOS Big Sur+ corner radius is ~22.5% of the icon size
+    rad = int(min(im.size) * 0.225) 
     circle = Image.new('L', (rad * 2, rad * 2), 0)
     draw = ImageDraw.Draw(circle)
     draw.ellipse((0, 0, rad * 2, rad * 2), fill=255)
