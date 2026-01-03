@@ -1123,23 +1123,25 @@ impl FastCsvApp {
                             // Double-click to open row detail popup
                             let row_idx_for_detail = actual_row_idx;
                                 row.col(|ui| {
+                                let rect = ui.available_rect_before_wrap();
+                                
                                 // Highlight background for "Go to Row" target
                                 if is_goto_highlighted {
-                                    let rect = ui.available_rect_before_wrap();
                                     ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(60, 100, 140));
                                 }
-                                let response = ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(format_number(actual_row_idx + 1))
-                                            .color(if is_goto_highlighted {
-                                                Color32::WHITE
-                                            } else {
-                                                Color32::from_rgb(140, 140, 140)
-                                            })
-                                            .small(),
-                                    )
-                                    .sense(egui::Sense::click()),
+                                
+                                ui.label(
+                                    egui::RichText::new(format_number(actual_row_idx + 1))
+                                        .color(if is_goto_highlighted {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_rgb(140, 140, 140)
+                                        })
+                                        .small(),
                                 );
+
+                                // Interact with the full cell area for easier clicking
+                                let response = ui.interact(rect, ui.id().with("row_click"), egui::Sense::click());
                                 if response.double_clicked() {
                                     row_to_open_detail = Some(row_idx_for_detail);
                                 }
