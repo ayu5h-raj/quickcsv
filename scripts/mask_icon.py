@@ -22,7 +22,16 @@ def add_corners(im, rad):
     ImageDraw.floodfill(im, (0, h-1), (0, 0, 0, 0), thresh=50)
     ImageDraw.floodfill(im, (w-1, h-1), (0, 0, 0, 0), thresh=50)
 
+    # Crop to the actual icon content (removing transparent margins)
+    bbox = im.getbbox()
+    if bbox:
+        im = im.crop(bbox)
+        # Resize back to original full size (or slightly smaller if we want safety value, but full is best for matching)
+        # We assume target is square.
+        im = im.resize((w, h), Image.Resampling.LANCZOS)
+
     # Now apply the soft rounded mask to ensure smooth edges
+    rad = int(min(im.size) * 0.175) # Recalculate radius based on new size (same)
     circle = Image.new('L', (rad * 2, rad * 2), 0)
     draw = ImageDraw.Draw(circle)
     draw.ellipse((0, 0, rad * 2, rad * 2), fill=255)
