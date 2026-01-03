@@ -1124,12 +1124,12 @@ impl FastCsvApp {
                             let row_idx_for_detail = actual_row_idx;
                                 row.col(|ui| {
                                 let rect = ui.available_rect_before_wrap();
-                                
+
                                 // Highlight background for "Go to Row" target
                                 if is_goto_highlighted {
                                     ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(60, 100, 140));
                                 }
-                                
+
                                 ui.label(
                                     egui::RichText::new(format_number(actual_row_idx + 1))
                                         .color(if is_goto_highlighted {
