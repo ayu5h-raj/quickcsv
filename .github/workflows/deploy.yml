@@ -25,6 +25,9 @@ jobs:
       - name: Build WASM
         run: trunk build --public-url /quickcsv/
 
+      - name: Add .nojekyll file
+        run: touch dist/.nojekyll
+
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
         with:
