@@ -96,8 +96,8 @@
     
     
 <script type="module">
-import init, * as bindings from '/quickcsv/quickcsv-a4b6f9251710fcb5.js';
-const wasm = await init({ module_or_path: '/quickcsv/quickcsv-a4b6f9251710fcb5_bg.wasm' });
+import init, * as bindings from '/quickcsv/quickcsv-f5090e49429c10ff.js';
+const wasm = await init({ module_or_path: '/quickcsv/quickcsv-f5090e49429c10ff_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -106,7 +106,37 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-<link rel="modulepreload" href="/quickcsv/quickcsv-a4b6f9251710fcb5.js" crossorigin="anonymous" integrity="sha384-0NkT4D+XrirFFbCSwy2dss4+dXzhpL81+bV5eac+buu9j1U/mdHM33LrHj5tTx/r"><link rel="preload" href="/quickcsv/quickcsv-a4b6f9251710fcb5_bg.wasm" crossorigin="anonymous" integrity="sha384-wkeztWrqRNNWAC3w4faRDvGMh2oZha9iS2dRYILsZDJ3BGer8EyxD4nB92MyLvCc" as="fetch" type="application/wasm"></head>
+    
+    <!-- Error handling and debugging -->
+    <script>
+        // Show error if WASM fails to load after timeout
+        setTimeout(function() {
+            const loadingText = document.getElementById('center_text');
+            if (loadingText && loadingText.parentNode) {
+                loadingText.innerHTML = '<p style="font-size:16px; color: #ff6b6b;">Failed to load QuickCSV</p><p style="font-size:12px; color: #909090; margin-top: 10px;">Please check the browser console (F12) for errors</p>';
+            }
+        }, 10000); // 10 second timeout
+
+        // Log when page loads
+        window.addEventListener('load', function() {
+            console.log('Page loaded, waiting for WASM...');
+        });
+
+        // Listen for Trunk events
+        window.addEventListener('TrunkApplicationStarted', function(event) {
+            console.log('Trunk application started:', event.detail);
+        });
+
+        // Catch any unhandled errors
+        window.addEventListener('error', function(event) {
+            console.error('Global error:', event.error);
+            const loadingText = document.getElementById('center_text');
+            if (loadingText && loadingText.parentNode) {
+                loadingText.innerHTML = '<p style="font-size:16px; color: #ff6b6b;">Error loading application</p><p style="font-size:12px; color: #909090; margin-top: 10px;">' + (event.error ? event.error.message : 'Unknown error') + '</p>';
+            }
+        });
+    </script>
+<link rel="modulepreload" href="/quickcsv/quickcsv-f5090e49429c10ff.js" crossorigin="anonymous" integrity="sha384-AX0ppz83dLVlO3GRGC/usDSJ4vMVMxb4tBIC6gY4Rcv5VBHP7GzjG6mLd11VaMNI"><link rel="preload" href="/quickcsv/quickcsv-f5090e49429c10ff_bg.wasm" crossorigin="anonymous" integrity="sha384-oTVWqXrGyzwUdPBkRD2Tbq2f/P3gkv0VkzSQdH5/2G1BQctmmXoWpulPaAj18sG1" as="fetch" type="application/wasm"></head>
 
 <body>
     <!-- The WASM code will reside here: -->
