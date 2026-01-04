@@ -79,7 +79,7 @@ QuickCSV uses memory-mapped I/O to handle large files efficiently:
 
 ## Performance
 
-Tested on MacBook M2. File opens **instantly** — indexing happens in the background.
+Tested on MacBook Air M2. File opens **instantly** — indexing happens in the background.
 
 | File Size | Rows | Open Time | Index Time | Scroll |
 |-----------|------|-----------|------------|--------|
