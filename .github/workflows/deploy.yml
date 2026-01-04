@@ -25,6 +25,23 @@ jobs:
       - name: Build WASM
         run: trunk build --public-url /quickcsv/
 
+      - name: Verify build output
+        run: |
+          echo "Checking dist folder contents:"
+          ls -la dist/ || echo "dist folder not found!"
+          echo ""
+          echo "Checking if index.html exists:"
+          test -f dist/index.html && echo "✓ index.html exists" || echo "✗ index.html missing"
+          echo ""
+          echo "Checking if WASM files exist:"
+          find dist -name "*.wasm" | head -5 || echo "No WASM files found!"
+          echo ""
+          echo "Checking if loader scripts exist:"
+          find dist -name "*.js" | head -5 || echo "No JS files found!"
+          echo ""
+          echo "Checking index.html for WASM loader:"
+          grep -i "wasm\|trunk" dist/index.html | head -5 || echo "No WASM/Trunk references in index.html!"
+
       - name: Add .nojekyll file
         run: touch dist/.nojekyll
 
