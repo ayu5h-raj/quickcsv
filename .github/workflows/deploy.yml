@@ -23,7 +23,7 @@ jobs:
         uses: jetli/trunk-action@v0.4.0
 
       - name: Build WASM
-        run: trunk build --release --public-url quickcsv
+        run: trunk build --public-url quickcsv
 
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
