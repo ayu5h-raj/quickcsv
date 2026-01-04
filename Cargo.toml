@@ -7,6 +7,15 @@ authors = ["QuickCSV Team"]
 license = "MIT"
 repository = "https://github.com/ayu5h-raj/quickcsv"
 
+[lib]
+name = "quickcsv"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "quickcsv"
+path = "src/main.rs"
+
 # macOS App Bundle configuration
 [package.metadata.bundle]
 name = "QuickCSV"
