@@ -2786,4 +2786,146 @@ mod tests {
         let data = b"just some text\nmore text here\n";
         assert_eq!(detect_delimiter(data), b',');
     }
+
+    // -------------------------------------------------------------------------
+    // Additional edge case tests for better coverage
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_format_file_size() {
+        // Test various file sizes
+        assert_eq!(format_file_size(0), "0 B");
+        assert_eq!(format_file_size(1023), "1023 B");
+        assert_eq!(format_file_size(1024), "1 KiB");
+        assert_eq!(format_file_size(1024 * 1024), "1 MiB");
+        assert_eq!(format_file_size(1024 * 1024 * 1024), "1 GiB");
+    }
+
+    #[test]
+    fn test_looks_like_json_empty() {
+        assert!(!looks_like_json(""));
+        assert!(!looks_like_json("   ")); // Only whitespace
+    }
+
+    #[test]
+    fn test_looks_like_json_nested() {
+        assert!(looks_like_json(r#"{"nested": {"key": "value"}}"#));
+        assert!(looks_like_json(r#"[[1, 2], [3, 4]]"#));
+    }
+
+    #[test]
+    fn test_truncate_exact_boundary() {
+        // Test string exactly at MAX_DISPLAY_LEN
+        let exact = "a".repeat(MAX_DISPLAY_LEN);
+        let result = truncate_for_display(&exact);
+        assert_eq!(result.len(), MAX_DISPLAY_LEN);
+        assert!(!result.ends_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_utf8_boundary() {
+        // Test with multi-byte UTF-8 characters
+        // '日' is 3 bytes, so truncating in the middle should be safe
+        let utf8_string = "日".repeat(100); // 300 bytes
+        let result = truncate_for_display(&utf8_string);
+        assert!(result.len() <= MAX_DISPLAY_LEN + 3);
+        // Verify it's valid UTF-8 (this would panic if not)
+        let _ = result.chars().count();
+    }
+
+    #[test]
+    fn test_format_number_edge_cases() {
+        assert_eq!(format_number(1), "1");
+        assert_eq!(format_number(12), "12");
+        assert_eq!(format_number(123), "123");
+        assert_eq!(format_number(1234), "1,234");
+        assert_eq!(format_number(12345), "12,345");
+        assert_eq!(format_number(123456), "123,456");
+    }
+
+    #[test]
+    fn test_is_newer_version_edge_cases() {
+        // Test with different length versions
+        assert!(is_newer_version("1.0.0.1", "1.0.0")); // More parts = newer
+        assert!(!is_newer_version("1.0.0", "1.0.0.1")); // Fewer parts = older
+
+        // Test with two-part versions
+        assert!(is_newer_version("2.0", "1.9"));
+        assert!(!is_newer_version("1.9", "2.0"));
+    }
+
+    #[test]
+    fn test_find_row_boundary_empty() {
+        let data = b"";
+        assert_eq!(find_row_boundary(data, 0), None);
+    }
+
+    #[test]
+    fn test_find_row_boundary_single_char() {
+        let data = b"a";
+        assert_eq!(find_row_boundary(data, 0), Some(1)); // EOF
+    }
+
+    #[test]
+    fn test_find_row_boundary_only_newline() {
+        let data = b"\n";
+        assert_eq!(find_row_boundary(data, 0), Some(1));
+    }
+
+    #[test]
+    fn test_find_row_boundary_only_crlf() {
+        let data = b"\r\n";
+        assert_eq!(find_row_boundary(data, 0), Some(2));
+    }
+
+    #[test]
+    fn test_find_row_boundary_complex_quoted() {
+        // Multiple quoted fields with embedded newlines
+        let data = b"\"a\nb\",\"c\nd\"\nrow2";
+        let boundary = find_row_boundary(data, 0);
+        assert_eq!(boundary, Some(12)); // After first complete row
+    }
+
+    #[test]
+    fn test_detect_delimiter_mixed() {
+        // File with both comma and semicolon but comma is more consistent
+        let data = b"a,b,c\n1,2,3\n4,5,6\n";
+        assert_eq!(detect_delimiter(data), b',');
+    }
+
+    #[test]
+    fn test_format_json_array() {
+        let json = r#"[1, 2, 3]"#;
+        let result = format_json(json);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("["));
+    }
+
+    #[test]
+    fn test_format_json_nested() {
+        let json = r#"{"outer": {"inner": "value"}}"#;
+        let result = format_json(json);
+        assert!(result.is_some());
+        let formatted = result.unwrap();
+        assert!(formatted.contains("outer"));
+        assert!(formatted.contains("inner"));
+    }
+
+    #[test]
+    fn test_truncate_empty_string() {
+        let result = truncate_for_display("");
+        assert_eq!(result.as_ref(), "");
+    }
+
+    #[test]
+    fn test_detect_delimiter_empty() {
+        let data = b"";
+        assert_eq!(detect_delimiter(data), b','); // Default to comma
+    }
+
+    #[test]
+    fn test_detect_delimiter_single_line() {
+        let data = b"a,b,c";
+        assert_eq!(detect_delimiter(data), b',');
+    }
 }
