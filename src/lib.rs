@@ -36,7 +36,7 @@ async fn yield_to_browser() {
 use csv::init_csv_progressive;
 use state::{
     GoToRowState, JsonViewerState, LoadState, RowDetailState, SearchState, SearchStatus,
-    SharedState, SortDirection, SortState,
+    SharedState, SortDirection, SortState, MAX_NAV_ROWS,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use update::check_for_updates;
