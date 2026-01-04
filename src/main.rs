@@ -2004,20 +2004,41 @@ impl eframe::App for FastCsvApp {
                                 );
                                 ui.add_space(10.0);
                                 if ui
-                                    .add(egui::Button::new("Update via Homebrew").small())
-                                    .on_hover_text("brew upgrade --cask quickcsv")
+                                    .add(egui::Button::new("Update in Terminal").small())
+                                    .on_hover_text("Opens Terminal to run: brew update && brew upgrade")
                                     .clicked()
                                 {
-                                    // Copy command to clipboard
-                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                        let _ = clipboard.set_text("brew upgrade --cask quickcsv");
+                                    // Open Terminal and run commands (update, upgrade, and restart app)
+                                    let script = "tell application \"Terminal\" to do script \"brew update && brew upgrade --cask quickcsv && open -a QuickCSV\"";
+
+                                    let success = std::process::Command::new("osascript")
+                                        .arg("-e")
+                                        .arg(script)
+                                        .spawn()
+                                        .is_ok();
+
+                                    // Fallback: copy command to clipboard if Terminal automation fails
+                                    if !success {
+                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                            let _ = clipboard.set_text("brew update && brew upgrade --cask quickcsv");
+                                        }
+                                        // Show macOS notification to inform user
+                                        let notify_script = "display notification \"Paste in Terminal to update\" with title \"QuickCSV\" subtitle \"Update command copied to clipboard\"";
+                                        let _ = std::process::Command::new("osascript")
+                                            .arg("-e")
+                                            .arg(notify_script)
+                                            .spawn();
                                     }
+
+                                    // Close this instance so it can be overwritten and restarted
+                                    std::process::exit(0);
                                 }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.add_space(10.0);
-                                        if ui.small_button(egui_phosphor::regular::X).clicked() {
+                                        // Use unicode X for guaranteed rendering
+                                        if ui.small_button("✕").clicked() {
                                             self.update_state.dismissed = true;
                                         }
                                     },
