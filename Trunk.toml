@@ -3,7 +3,8 @@ target = "index.html"
 dist = "dist"
 release = true
 filehash = true
-wasm_opt = ["-O", "--enable-bulk-memory"]
 
+# Disable wasm-opt completely - its validator doesn't support bulk-memory
+# which Rust uses by default. Modern browsers handle this fine.
 [tools]
-wasm_opt = "version_116"
+wasm_opt = "off"
