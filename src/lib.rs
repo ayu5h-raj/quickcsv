@@ -23,7 +23,9 @@ use state::{
     GoToRowState, JsonViewerState, LoadState, RowDetailState, SearchState, SearchStatus,
     SharedState, SortDirection, SortState, MAX_NAV_ROWS,
 };
-use update::{check_for_updates, UpdateState};
+#[cfg(not(target_arch = "wasm32"))]
+use update::check_for_updates;
+use update::UpdateState;
 use utils::{format_file_size, format_json, format_number, looks_like_json, truncate_for_display};
 
 /// Height of each row in pixels
@@ -90,6 +92,7 @@ impl Default for FastCsvApp {
 
 impl FastCsvApp {
     /// Open a file dialog and load the selected CSV file
+    #[cfg(not(target_arch = "wasm32"))]
     fn open_file(&mut self, ctx: &egui::Context) {
         // Cancel any ongoing indexing
         {
@@ -108,6 +111,7 @@ impl FastCsvApp {
     }
 
     /// Load a CSV file in the background
+    #[cfg(not(target_arch = "wasm32"))]
     fn load_file(&mut self, path: PathBuf, ctx: egui::Context) {
         // Reset state
         self.scroll_y = 0.0;
@@ -1145,9 +1149,7 @@ impl FastCsvApp {
                         )
                         .clicked()
                     {
-                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                            let _ = clipboard.set_text(&formatted);
-                        }
+                        ui.ctx().copy_text(formatted.clone());
                     }
 
                     ui.add_space(8.0);
@@ -1162,9 +1164,7 @@ impl FastCsvApp {
                         )
                         .clicked()
                     {
-                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                            let _ = clipboard.set_text(&raw);
-                        }
+                        ui.ctx().copy_text(raw.clone());
                     }
 
                     // Close button on the right
@@ -1340,43 +1340,38 @@ impl FastCsvApp {
                             .button(format!("{} Copy as CSV", egui_phosphor::regular::COPY))
                             .clicked()
                         {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let csv_row = self
-                                    .row_detail
-                                    .fields
-                                    .iter()
-                                    .map(|f| {
-                                        if f.contains(',') || f.contains('"') || f.contains('\n') {
-                                            format!("\"{}\"", f.replace('"', "\"\""))
-                                        } else {
-                                            f.clone()
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(",");
-                                let _ = clipboard.set_text(&csv_row);
-                            }
+                            let csv_row = self
+                                .row_detail
+                                .fields
+                                .iter()
+                                .map(|f| {
+                                    if f.contains(',') || f.contains('"') || f.contains('\n') {
+                                        format!("\"{}\"", f.replace('"', "\"\""))
+                                    } else {
+                                        f.clone()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            ui.ctx().copy_text(csv_row);
                         }
 
                         if ui
                             .button(format!("{} Copy as JSON", egui_phosphor::regular::CODE))
                             .clicked()
                         {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let mut json_obj = serde_json::Map::new();
-                                for (i, field) in self.row_detail.fields.iter().enumerate() {
-                                    let header = self
-                                        .row_detail
-                                        .headers
-                                        .get(i)
-                                        .cloned()
-                                        .unwrap_or_else(|| format!("col_{}", i));
-                                    json_obj
-                                        .insert(header, serde_json::Value::String(field.clone()));
-                                }
-                                if let Ok(json_str) = serde_json::to_string_pretty(&json_obj) {
-                                    let _ = clipboard.set_text(&json_str);
-                                }
+                            let mut json_obj = serde_json::Map::new();
+                            for (i, field) in self.row_detail.fields.iter().enumerate() {
+                                let header = self
+                                    .row_detail
+                                    .headers
+                                    .get(i)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("col_{}", i));
+                                json_obj.insert(header, serde_json::Value::String(field.clone()));
+                            }
+                            if let Ok(json_str) = serde_json::to_string_pretty(&json_obj) {
+                                ui.ctx().copy_text(json_str);
                             }
                         }
                     });
@@ -1438,11 +1433,7 @@ impl FastCsvApp {
                                                     .on_hover_text("Copy value")
                                                     .clicked()
                                                 {
-                                                    if let Ok(mut clipboard) =
-                                                        arboard::Clipboard::new()
-                                                    {
-                                                        let _ = clipboard.set_text(field);
-                                                    }
+                                                    ui.ctx().copy_text(field.clone());
                                                 }
 
                                                 // JSON button if it looks like JSON
@@ -1563,6 +1554,7 @@ impl eframe::App for FastCsvApp {
         // Check for updates on startup (only once)
         if !self.update_state.check_initiated {
             self.update_state.check_initiated = true;
+            #[cfg(not(target_arch = "wasm32"))]
             check_for_updates(
                 Arc::clone(&self.update_state.latest_version),
                 Arc::clone(&self.update_state.update_available),
@@ -1610,6 +1602,7 @@ impl eframe::App for FastCsvApp {
                 ui.menu_button("File", |ui: &mut egui::Ui| {
                     if ui.button("Open...").clicked() {
                         ui.close();
+                        #[cfg(not(target_arch = "wasm32"))]
                         self.open_file(ctx);
                     }
                     ui.separator();
@@ -1682,6 +1675,7 @@ impl eframe::App for FastCsvApp {
         }
 
         // Update available banner
+        #[cfg(not(target_arch = "wasm32"))]
         if self.update_state.update_available.load(Ordering::Relaxed)
             && !self.update_state.dismissed
         {
@@ -1769,6 +1763,7 @@ impl eframe::App for FastCsvApp {
                             ui.heading("QuickCSV");
                             ui.add_space(20.0);
                             if ui.button("📂 Open CSV File").clicked() {
+                                #[cfg(not(target_arch = "wasm32"))]
                                 self.open_file(ctx);
                             }
                             ui.add_space(10.0);
@@ -1809,6 +1804,7 @@ impl eframe::App for FastCsvApp {
                             ui.add_space(20.0);
                             if ui.button("Try Again").clicked() {
                                 drop(state);
+                                #[cfg(not(target_arch = "wasm32"))]
                                 self.open_file(ctx);
                             }
                         });
@@ -1827,6 +1823,7 @@ impl eframe::App for FastCsvApp {
         self.render_row_detail_popup(ctx);
 
         // Handle dropped files
+        #[cfg(not(target_arch = "wasm32"))]
         ctx.input(|i| {
             for file in &i.raw.dropped_files {
                 if let Some(path) = &file.path {

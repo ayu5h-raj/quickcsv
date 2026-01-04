@@ -1,14 +1,22 @@
 //! Memory-mapped CSV file structure
 
-use memmap2::Mmap;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use memmap2::Mmap;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type DataStore = Mmap;
+
+#[cfg(target_arch = "wasm32")]
+pub type DataStore = Vec<u8>;
+
 /// Memory-mapped CSV file with row offset index
 pub struct MappedCsv {
-    /// Memory-mapped file data
-    pub(crate) mmap: Mmap,
+    /// Memory-mapped file data (Native) or Byte vector (Web)
+    pub(crate) data: DataStore,
     /// Byte offset of each row (including header) - shared for progressive loading
     pub row_offsets: Arc<RwLock<Vec<usize>>>,
     /// Column headers
@@ -46,10 +54,10 @@ impl MappedCsv {
         let end = if data_row_offset_index + 1 < offsets.len() {
             offsets[data_row_offset_index + 1]
         } else {
-            self.mmap.len()
+            self.data.len()
         };
 
-        Some(&self.mmap[start..end])
+        Some(&self.data[start..end])
     }
 
     /// Parse a single row into fields

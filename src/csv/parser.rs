@@ -6,8 +6,10 @@
 use super::MappedCsv;
 use crate::state::{LoadState, SharedState};
 use eframe::egui;
+#[cfg(not(target_arch = "wasm32"))]
 use memmap2::Mmap;
 use parking_lot::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -136,7 +138,8 @@ pub fn detect_delimiter(bytes: &[u8]) -> u8 {
     best_delimiter
 }
 
-/// Initialize CSV file for progressive loading - parses headers and starts indexing
+/// Initialize CSV file for progressive loading - parses headers and starts indexing (Native Only)
+#[cfg(not(target_arch = "wasm32"))]
 pub fn init_csv_progressive(
     path: &PathBuf,
     state: &Arc<RwLock<SharedState>>,
@@ -197,7 +200,7 @@ pub fn init_csv_progressive(
 
     // Create MappedCsv immediately so UI can show data
     let mapped_csv = MappedCsv {
-        mmap,
+        data: mmap,
         row_offsets: Arc::clone(&row_offsets),
         headers,
         path: path.clone(),
