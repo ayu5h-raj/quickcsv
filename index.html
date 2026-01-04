@@ -84,6 +84,9 @@
         }
     </style>
     
+    <!-- Trunk Rust/WASM loader - MUST be before any script tags -->
+    <link data-trunk rel="rust" href="Cargo.toml" data-target-name="quickcsv" data-wasm-opt="0" />
+    
     <!-- Google Analytics -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-02EQ3MT9HS"></script>
     <script>
@@ -93,8 +96,6 @@
 
       gtag('config', 'G-02EQ3MT9HS');
     </script>
-    
-    <link data-trunk rel="rust" href="Cargo.toml" data-target-name="quickcsv" data-wasm-opt="0" />
     
     <!-- Error handling and debugging -->
     <script>
