@@ -6,6 +6,8 @@ A blazing-fast CSV viewer for macOS that handles files from 100MB to 2GB+ with z
 ![Platform](https://img.shields.io/badge/platform-macOS-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
+🌐 **Try it in your browser:** [https://ayu5h-raj.github.io/quickcsv/](https://ayu5h-raj.github.io/quickcsv/) *(Note: Web version loads files into RAM, unlike desktop which uses memory-mapped I/O)*
+
 ## Features
 
 - 🚀 **Instant File Opening** - Memory-mapped I/O means no waiting
