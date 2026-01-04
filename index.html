@@ -95,6 +95,36 @@
     </script>
     
     <link data-trunk rel="rust" href="Cargo.toml" data-target-name="quickcsv" data-wasm-opt="0" />
+    
+    <!-- Error handling and debugging -->
+    <script>
+        // Show error if WASM fails to load after timeout
+        setTimeout(function() {
+            const loadingText = document.getElementById('center_text');
+            if (loadingText && loadingText.parentNode) {
+                loadingText.innerHTML = '<p style="font-size:16px; color: #ff6b6b;">Failed to load QuickCSV</p><p style="font-size:12px; color: #909090; margin-top: 10px;">Please check the browser console (F12) for errors</p>';
+            }
+        }, 10000); // 10 second timeout
+
+        // Log when page loads
+        window.addEventListener('load', function() {
+            console.log('Page loaded, waiting for WASM...');
+        });
+
+        // Listen for Trunk events
+        window.addEventListener('TrunkApplicationStarted', function(event) {
+            console.log('Trunk application started:', event.detail);
+        });
+
+        // Catch any unhandled errors
+        window.addEventListener('error', function(event) {
+            console.error('Global error:', event.error);
+            const loadingText = document.getElementById('center_text');
+            if (loadingText && loadingText.parentNode) {
+                loadingText.innerHTML = '<p style="font-size:16px; color: #ff6b6b;">Error loading application</p><p style="font-size:12px; color: #909090; margin-top: 10px;">' + (event.error ? event.error.message : 'Unknown error') + '</p>';
+            }
+        });
+    </script>
 </head>
 
 <body>

@@ -2204,25 +2204,50 @@ pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
     // Redirect panic messages to console.log
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
 
+    web_sys::console::log_1(&"QuickCSV: Starting WASM initialization...".into());
+
     let web_options = eframe::WebOptions::default();
 
-    let document = web_sys::window().unwrap().document().unwrap();
+    let window = web_sys::window().ok_or_else(|| {
+        let err = "Failed to get window object".into();
+        web_sys::console::error_1(&err);
+        err
+    })?;
+
+    let document = window.document().ok_or_else(|| {
+        let err = "Failed to get document object".into();
+        web_sys::console::error_1(&err);
+        err
+    })?;
+
     // Remove loading text
     if let Some(loading_text) = document.get_element_by_id("center_text") {
         loading_text.remove();
+        web_sys::console::log_1(&"QuickCSV: Removed loading text".into());
     }
 
     let canvas = document
         .get_element_by_id("the_canvas_id")
-        .expect("Failed to find canvas with id 'the_canvas_id'")
+        .ok_or_else(|| {
+            let err = "Failed to find canvas with id 'the_canvas_id'".into();
+            web_sys::console::error_1(&err);
+            err
+        })?
         .dyn_into::<web_sys::HtmlCanvasElement>()
-        .unwrap();
+        .map_err(|e| {
+            let err = format!("Failed to cast to HtmlCanvasElement: {:?}", e).into();
+            web_sys::console::error_1(&err);
+            err
+        })?;
+
+    web_sys::console::log_1(&"QuickCSV: Starting WebRunner...".into());
 
     eframe::WebRunner::new()
         .start(
             canvas,
             web_options,
             Box::new(|cc| {
+                web_sys::console::log_1(&"QuickCSV: Creating app instance...".into());
                 // Add Phosphor icons to fonts
                 let mut fonts = egui::FontDefinitions::default();
                 egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -2235,4 +2260,12 @@ pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
             }),
         )
         .await
+        .map_err(|e| {
+            let err = format!("WebRunner failed: {:?}", e).into();
+            web_sys::console::error_1(&err);
+            err
+        })?;
+
+    web_sys::console::log_1(&"QuickCSV: Initialization complete!".into());
+    Ok(())
 }
