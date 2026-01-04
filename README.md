@@ -79,13 +79,14 @@ QuickCSV uses memory-mapped I/O to handle large files efficiently:
 
 ## Performance
 
-Tested on MacBook Pro M1:
+Tested on MacBook M2. File opens **instantly** — indexing happens in the background.
 
-| File Size | Rows | Open Time | Scroll |
-|-----------|------|-----------|--------|
-| 10 MB | 100K | < 100ms | Smooth |
-| 100 MB | 740K | < 500ms | Smooth |
-| 1 GB | 7M+ | < 2s | Smooth |
+| File Size | Rows | Open Time | Index Time | Scroll |
+|-----------|------|-----------|------------|--------|
+| 10 MB | 100K | Instant | ~50ms | Smooth |
+| 100 MB | 740K | Instant | ~200ms | Smooth |
+| 1 GB | 7M+ | Instant | ~1s | Smooth |
+| 3 GB | 20M+ | Instant | ~3s | Smooth |
 
 ## Keyboard Shortcuts
 
