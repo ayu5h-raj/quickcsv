@@ -46,6 +46,12 @@ brew update && brew upgrade --cask quickcsv
 
 Download the latest `QuickCSV.app` from the [Releases page](https://github.com/ayu5h-raj/quickcsv/releases).
 
+### Try Web Version
+
+You can try QuickCSV in your browser at **[https://ayu5h-raj.github.io/quickcsv/](https://ayu5h-raj.github.io/quickcsv/)**.
+
+> **Note:** The web version is not as efficient as the desktop version due to browser limitations, but it's great for trying out QuickCSV without installation. On a MacBook M2 Air, files typically open in a few seconds.
+
 ## Build from Source
 
 ```bash
