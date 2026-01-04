@@ -4,6 +4,6 @@ dist = "dist"
 release = true
 filehash = true
 
-# Disable wasm-opt - use boolean false, not string
+# Disable wasm-opt via data-wasm-opt="0" in index.html
 # This prevents Trunk from downloading/running wasm-opt
 # Modern browsers handle bulk-memory operations natively
