@@ -6,6 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 
 <head>
+    <base href="/quickcsv/" />
     <title>QuickCSV Web</title>
     <style>
         html {
@@ -95,8 +96,8 @@
     
     
 <script type="module">
-import init, * as bindings from 'quickcsv/quickcsv-a4b6f9251710fcb5.js';
-const wasm = await init({ module_or_path: 'quickcsv/quickcsv-a4b6f9251710fcb5_bg.wasm' });
+import init, * as bindings from '/quickcsv/quickcsv-a4b6f9251710fcb5.js';
+const wasm = await init({ module_or_path: '/quickcsv/quickcsv-a4b6f9251710fcb5_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -105,7 +106,7 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-<link rel="modulepreload" href="quickcsv/quickcsv-a4b6f9251710fcb5.js" crossorigin="anonymous" integrity="sha384-SM2+5vWCaXunuhjrTW23Fi0dgiMDV1osD3F5714ZGhJE0EX2oUX4Rk20pJFTycol"><link rel="preload" href="quickcsv/quickcsv-a4b6f9251710fcb5_bg.wasm" crossorigin="anonymous" integrity="sha384-dWeslpYwKI52LyCElsn6IcBgrnTTO8VZ2N6hxp2f2Z0r5NhkphpISTXp9p99s1SJ" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/quickcsv/quickcsv-a4b6f9251710fcb5.js" crossorigin="anonymous" integrity="sha384-0NkT4D+XrirFFbCSwy2dss4+dXzhpL81+bV5eac+buu9j1U/mdHM33LrHj5tTx/r"><link rel="preload" href="/quickcsv/quickcsv-a4b6f9251710fcb5_bg.wasm" crossorigin="anonymous" integrity="sha384-wkeztWrqRNNWAC3w4faRDvGMh2oZha9iS2dRYILsZDJ3BGer8EyxD4nB92MyLvCc" as="fetch" type="application/wasm"></head>
 
 <body>
     <!-- The WASM code will reside here: -->

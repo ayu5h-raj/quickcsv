@@ -307,6 +307,10 @@ if (!('encodeInto' in cachedTextEncoder)) {
 
 let WASM_VECTOR_LEN = 0;
 
+function __wasm_bindgen_func_elem_730(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_730(arg0, arg1, addHeapObject(arg2));
+}
+
 function __wasm_bindgen_func_elem_732(arg0, arg1) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
@@ -319,10 +323,6 @@ function __wasm_bindgen_func_elem_732(arg0, arg1) {
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
-}
-
-function __wasm_bindgen_func_elem_730(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_730(arg0, arg1, addHeapObject(arg2));
 }
 
 function __wasm_bindgen_func_elem_630(arg0, arg1) {
