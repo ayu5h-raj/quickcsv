@@ -53,6 +53,9 @@ Download the latest `QuickCSV.app` from the [Releases page](https://github.com/a
 git clone https://github.com/ayu5h-raj/quickcsv.git
 cd quickcsv
 
+# Enable pre-commit hook (recommended)
+git config core.hooksPath .githooks
+
 # Build and run
 cargo run --release
 ```
