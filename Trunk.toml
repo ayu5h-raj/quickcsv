@@ -1,6 +1,8 @@
 [build]
 target = "index.html"
 dist = "dist"
+release = true
+filehash = true
 
 [tools]
-wasm_opt = "z"
+wasm_opt = "version_116"
