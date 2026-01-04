@@ -6,4 +6,4 @@ mod mapped;
 mod parser;
 
 pub use mapped::MappedCsv;
-pub use parser::{detect_delimiter, find_row_boundary, init_csv_progressive};
+pub use parser::init_csv_progressive;

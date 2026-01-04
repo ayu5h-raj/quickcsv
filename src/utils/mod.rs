@@ -6,5 +6,5 @@
 mod format;
 mod json;
 
-pub use format::{format_file_size, format_number, truncate_for_display, MAX_DISPLAY_LEN};
+pub use format::{format_file_size, format_number, truncate_for_display};
 pub use json::{format_json, looks_like_json};
