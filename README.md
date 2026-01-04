@@ -68,6 +68,23 @@ cargo bundle --release
 # Output: target/release/bundle/osx/QuickCSV.app
 ```
 
+### Build for Web
+
+**Prerequisites:**
+```bash
+rustup target add wasm32-unknown-unknown
+brew install trunk  # or cargo install --locked trunk
+```
+
+**Run locally:**
+```bash
+trunk serve
+```
+Open http://127.0.0.1:8080 to view the app.
+
+**Deployment:**
+The project is configured to deploy to GitHub Pages automatically via GitHub Actions.
+
 ## How It Works
 
 QuickCSV uses memory-mapped I/O to handle large files efficiently:

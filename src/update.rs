@@ -2,9 +2,12 @@
 //!
 //! This module handles checking for updates from GitHub releases.
 
-use eframe::egui;
 #[cfg(not(target_arch = "wasm32"))]
+use eframe::egui;
 use parking_lot::RwLock;
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::AtomicBool;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]

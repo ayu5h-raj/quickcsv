@@ -12,8 +12,11 @@ use parking_lot::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 /// Find the next row boundary in CSV data, respecting quoted fields.
@@ -451,4 +454,104 @@ mod tests {
         let data = b"a,b,c\n1,2,3\n4,5,6\n";
         assert_eq!(detect_delimiter(data), b',');
     }
+}
+
+/// Initialize CSV file for Web (In-memory, synchronous for now)
+#[cfg(target_arch = "wasm32")]
+pub fn init_csv_web(
+    name: String,
+    bytes: Vec<u8>,
+    state: &Arc<RwLock<SharedState>>,
+    ctx: &egui::Context,
+) -> Result<(), String> {
+    let file_size = bytes.len() as u64;
+
+    if file_size == 0 {
+        return Err("File is empty".to_string());
+    }
+
+    // Detect delimiter
+    let delimiter = detect_delimiter(&bytes);
+
+    // Find the first row boundary to get headers
+    let first_row_end = find_row_boundary(&bytes, 0).unwrap_or(bytes.len());
+
+    // Header parsing logic (duplicated for now, could be shared)
+    let header_end = if first_row_end > 0 && first_row_end <= bytes.len() {
+        let mut end = first_row_end;
+        if end > 0 && bytes.get(end - 1) == Some(&b'\n') {
+            end -= 1;
+        }
+        if end > 0 && bytes.get(end - 1) == Some(&b'\r') {
+            end -= 1;
+        }
+        end
+    } else {
+        first_row_end
+    };
+
+    let header_bytes = &bytes[0..header_end];
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(delimiter)
+        .from_reader(header_bytes);
+
+    let headers: Vec<String> = reader
+        .records()
+        .next()
+        .and_then(|r| r.ok())
+        .map(|record| record.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_else(|| vec!["Column".to_string()]);
+
+    let row_offsets = Arc::new(RwLock::new(vec![0, first_row_end]));
+
+    // Index the rest of the file synchronously (might freeze UI for large files)
+    // TODO: Make this async/chunked for better UX
+    let mut offset = first_row_end;
+    let mut batch_offsets = Vec::with_capacity(10000);
+
+    // Simple indexing loop
+    while offset < bytes.len() {
+        if let Some(next_offset) = find_row_boundary(&bytes, offset) {
+            if next_offset > offset && next_offset < bytes.len() {
+                batch_offsets.push(next_offset);
+            }
+            offset = next_offset;
+            if offset >= bytes.len() {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    {
+        let mut offsets = row_offsets.write();
+        offsets.extend(batch_offsets);
+    }
+
+    let total_rows = row_offsets.read().len();
+
+    let mapped_csv = MappedCsv {
+        data: bytes, // Vec<u8>
+        row_offsets: row_offsets,
+        headers,
+        path: PathBuf::from(name), // Fake path
+        file_size,
+        delimiter,
+    };
+
+    // Update state to Ready
+    {
+        let mut state_guard = state.write();
+        state_guard.csv = Some(mapped_csv);
+        state_guard.load_state = LoadState::Ready;
+        state_guard
+            .rows_indexed
+            .store(total_rows, Ordering::Relaxed);
+        state_guard.indexing_complete.store(true, Ordering::Relaxed);
+    }
+
+    ctx.request_repaint();
+    Ok(())
 }

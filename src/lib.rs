@@ -12,16 +12,31 @@ pub mod utils;
 use eframe::egui::{self, Color32, Key};
 
 use parking_lot::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_arch = "wasm32")]
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
+#[cfg(target_arch = "wasm32")]
+async fn yield_to_browser() {
+    // Use setTimeout(0) to yield to the macro-task queue, allowing UI rendering
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let window = web_sys::window().expect("should have a window");
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0);
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
 // Imports from modules
+#[cfg(not(target_arch = "wasm32"))]
 use csv::init_csv_progressive;
 use state::{
     GoToRowState, JsonViewerState, LoadState, RowDetailState, SearchState, SearchStatus,
-    SharedState, SortDirection, SortState, MAX_NAV_ROWS,
+    SharedState, SortDirection, SortState,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use update::check_for_updates;
@@ -68,10 +83,18 @@ pub struct FastCsvApp {
     row_detail: RowDetailState,
     /// Update checker state
     update_state: UpdateState,
+    #[cfg(target_arch = "wasm32")]
+    /// Channel for receiving loaded file data from async web tasks
+    file_loader_tx: Sender<(String, Vec<u8>)>,
+    #[cfg(target_arch = "wasm32")]
+    file_loader_rx: Receiver<(String, Vec<u8>)>,
 }
 
 impl Default for FastCsvApp {
     fn default() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let (tx, rx) = channel();
+
         Self {
             state: Arc::new(RwLock::new(SharedState::default())),
             scroll_y: 0.0,
@@ -86,6 +109,10 @@ impl Default for FastCsvApp {
             go_to_row: GoToRowState::default(),
             row_detail: RowDetailState::default(),
             update_state: UpdateState::default(),
+            #[cfg(target_arch = "wasm32")]
+            file_loader_tx: tx,
+            #[cfg(target_arch = "wasm32")]
+            file_loader_rx: rx,
         }
     }
 }
@@ -108,6 +135,42 @@ impl FastCsvApp {
         {
             self.load_file(path, ctx.clone());
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn open_file_web(&mut self, ctx: egui::Context) {
+        let task = rfd::AsyncFileDialog::new()
+            .add_filter("CSV", &["csv", "tsv", "txt"])
+            .pick_file();
+
+        let tx = self.file_loader_tx.clone();
+        let state = self.state.clone();
+        let ctx = ctx.clone();
+
+        // Indicate loading started (spinner will show if we set state here)
+        // But better to wait until we actually receive data to avoid premature clearing
+
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Some(file) = task.await {
+                let name: String = file.file_name();
+                let bytes = file.read().await;
+
+                // Show loading state immediately to give feedback
+                {
+                    let mut state = state.write();
+                    state.load_state = LoadState::Indexing;
+                }
+                ctx.request_repaint();
+
+                // Send to main thread for processing
+                if let Err(e) = tx.send((name, bytes)) {
+                    web_sys::console::error_1(&format!("Failed to send file data: {}", e).into());
+                }
+
+                // Trigger repaint to process the channel
+                ctx.request_repaint();
+            }
+        });
     }
 
     /// Load a CSV file in the background
@@ -217,8 +280,9 @@ impl FastCsvApp {
         let cancel_flag = Arc::clone(&self.sort_state.cancel_flag);
         let ctx = ctx.clone();
 
-        // Spawn background sorting thread
-        thread::spawn(move || {
+        // Spawn background sorting thread (Native)
+        #[cfg(not(target_arch = "wasm32"))]
+        let sort_task = move || {
             let state_guard = state.read();
             let csv = match &state_guard.csv {
                 Some(csv) => csv,
@@ -234,10 +298,9 @@ impl FastCsvApp {
             const MAX_SORT_ROWS: usize = 100_000;
             let rows_to_sort = total_rows.min(MAX_SORT_ROWS);
 
-            // Collect row data for sorting (with progress updates)
+            // Collect row data
             let mut row_data: Vec<(usize, String)> = Vec::with_capacity(rows_to_sort);
             for row_idx in 0..rows_to_sort {
-                // Check for cancellation
                 if cancel_flag.load(Ordering::Relaxed) {
                     is_sorting.store(false, Ordering::SeqCst);
                     return;
@@ -248,7 +311,6 @@ impl FastCsvApp {
                     row_data.push((row_idx, value));
                 }
 
-                // Update progress (collection phase = 0-50%)
                 if row_idx % 5000 == 0 {
                     let pct = (row_idx * 50) / rows_to_sort;
                     progress.store(pct, Ordering::Relaxed);
@@ -259,28 +321,22 @@ impl FastCsvApp {
             progress.store(50, Ordering::Relaxed);
             ctx.request_repaint();
 
-            // Sort by column value
+            // Sort
             match new_direction {
                 SortDirection::Ascending => {
-                    row_data.sort_by(|a, b| {
-                        // Try numeric comparison first
-                        match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
-                            (Ok(a_num), Ok(b_num)) => a_num
-                                .partial_cmp(&b_num)
-                                .unwrap_or(std::cmp::Ordering::Equal),
-                            _ => a.1.to_lowercase().cmp(&b.1.to_lowercase()),
-                        }
+                    row_data.sort_by(|a, b| match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                        (Ok(a_num), Ok(b_num)) => a_num
+                            .partial_cmp(&b_num)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                        _ => a.1.to_lowercase().cmp(&b.1.to_lowercase()),
                     });
                 }
                 SortDirection::Descending => {
-                    row_data.sort_by(|a, b| {
-                        // Try numeric comparison first
-                        match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
-                            (Ok(a_num), Ok(b_num)) => b_num
-                                .partial_cmp(&a_num)
-                                .unwrap_or(std::cmp::Ordering::Equal),
-                            _ => b.1.to_lowercase().cmp(&a.1.to_lowercase()),
-                        }
+                    row_data.sort_by(|a, b| match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                        (Ok(a_num), Ok(b_num)) => b_num
+                            .partial_cmp(&a_num)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                        _ => b.1.to_lowercase().cmp(&a.1.to_lowercase()),
                     });
                 }
                 SortDirection::None => {}
@@ -289,7 +345,6 @@ impl FastCsvApp {
             progress.store(90, Ordering::Relaxed);
             ctx.request_repaint();
 
-            // Store sorted indices
             {
                 let mut indices = sorted_indices.write();
                 *indices = row_data.into_iter().map(|(idx, _)| idx).collect();
@@ -298,7 +353,101 @@ impl FastCsvApp {
             progress.store(100, Ordering::Relaxed);
             is_sorting.store(false, Ordering::SeqCst);
             ctx.request_repaint();
-        });
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        thread::spawn(sort_task);
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let direction = new_direction;
+            wasm_bindgen_futures::spawn_local(async move {
+                // Async collection phase
+                const MAX_SORT_ROWS: usize = 100_000;
+
+                let (_total_rows, rows_to_sort) = {
+                    let state_guard = state.read();
+                    if let Some(csv) = &state_guard.csv {
+                        let total = csv.indexed_row_count();
+                        (total, total.min(MAX_SORT_ROWS))
+                    } else {
+                        is_sorting.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                };
+
+                let mut row_data: Vec<(usize, String)> = Vec::with_capacity(rows_to_sort);
+                const BATCH_SIZE: usize = 5000;
+
+                for start_idx in (0..rows_to_sort).step_by(BATCH_SIZE) {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        is_sorting.store(false, Ordering::SeqCst);
+                        return;
+                    }
+
+                    // Process batch
+                    {
+                        let state_guard = state.read();
+                        if let Some(csv) = &state_guard.csv {
+                            let end_idx = (start_idx + BATCH_SIZE).min(rows_to_sort);
+                            for row_idx in start_idx..end_idx {
+                                if let Some(fields) = csv.parse_row(row_idx) {
+                                    let value = fields.get(col_idx).cloned().unwrap_or_default();
+                                    row_data.push((row_idx, value));
+                                }
+                            }
+                        }
+                    }
+
+                    // Update progress
+                    let pct = (start_idx * 50) / rows_to_sort;
+                    progress.store(pct, Ordering::Relaxed);
+                    ctx.request_repaint();
+
+                    // Yield
+                    yield_to_browser().await;
+                }
+
+                progress.store(50, Ordering::Relaxed);
+
+                // Sorting phase (blocking but limited to 100k rows, should be <1s)
+                // If this is too slow, we'd need an async sort algo.
+                yield_to_browser().await;
+
+                match direction {
+                    SortDirection::Ascending => {
+                        row_data.sort_by(|a, b| match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                            (Ok(a_num), Ok(b_num)) => a_num
+                                .partial_cmp(&b_num)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                            _ => a.1.to_lowercase().cmp(&b.1.to_lowercase()),
+                        });
+                    }
+                    SortDirection::Descending => {
+                        row_data.sort_by(|a, b| match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                            (Ok(a_num), Ok(b_num)) => b_num
+                                .partial_cmp(&a_num)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                            _ => b.1.to_lowercase().cmp(&a.1.to_lowercase()),
+                        });
+                    }
+                    SortDirection::None => {}
+                }
+
+                progress.store(90, Ordering::Relaxed);
+                ctx.request_repaint();
+                yield_to_browser().await;
+
+                {
+                    let mut indices = sorted_indices.write();
+                    *indices = row_data.into_iter().map(|(idx, _)| idx).collect();
+                }
+
+                progress.store(100, Ordering::Relaxed);
+                is_sorting.store(false, Ordering::SeqCst);
+                ctx.request_repaint();
+            });
+        }
     }
 
     /// Get the actual row index considering sorting
@@ -389,7 +538,8 @@ impl FastCsvApp {
         let ctx = ctx.clone();
 
         // Spawn background search thread
-        thread::spawn(move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        let search_task = move || {
             const BATCH_SIZE: usize = 10000;
 
             let mut nav_rows: Vec<usize> = Vec::new();
@@ -454,7 +604,144 @@ impl FastCsvApp {
             results.nav_limit_reached = nav_limit_reached;
             drop(results);
             ctx.request_repaint();
-        });
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        thread::spawn(search_task);
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            // For Web, we must run asynchronously and yield to the browser
+            // to prevent freezing the UI during long searches.
+            // We replicate the logic from search_task but add yields.
+
+            let query = self.search.active_query.clone().trim().to_lowercase();
+            // let cancel_flag = Arc::clone(&self.search.cancel_flag); // Use outer variable
+
+            wasm_bindgen_futures::spawn_local(async move {
+                const BATCH_SIZE: usize = 1000;
+                let mut row_idx = 0;
+                let mut nav_rows: Vec<usize> = Vec::new();
+                let mut total_matches: usize = 0;
+                let mut nav_limit_reached = false;
+                const MAX_NAV_ROWS: usize = 1000; // Limit navigation rows
+
+                loop {
+                    // 1. Process a batch of rows under read lock
+                    let (should_continue, rows_processed, chunk_matches, limit_reached) = {
+                        let state_guard = state.read();
+                        let csv = match &state_guard.csv {
+                            Some(csv) => csv,
+                            None => {
+                                let mut results = results.write();
+                                results.status = SearchStatus::Idle;
+                                return;
+                            }
+                        };
+
+                        let total_rows = csv.indexed_row_count();
+                        if row_idx >= total_rows {
+                            (false, 0, vec![], false)
+                        } else {
+                            let end_idx = (row_idx + BATCH_SIZE).min(total_rows);
+                            let mut matches = Vec::new();
+                            let mut batch_limit_reached = false;
+
+                            for i in row_idx..end_idx {
+                                // Check cancellation inside batch? Maybe too granular for WASM,
+                                // check once per batch is fine.
+                                if cancel_flag.load(Ordering::Relaxed) {
+                                    return; // Handled outside loop
+                                }
+
+                                if let Some(fields) = csv.parse_row(i) {
+                                    let mut row_has_match = false;
+                                    for field in fields.iter() {
+                                        if field.to_lowercase().contains(&query) {
+                                            row_has_match = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if row_has_match {
+                                        matches.push(i);
+                                        // Check limit
+                                        // Note: We only count matches for nav rows up to limit,
+                                        // but ideally we want TOTAL match count.
+                                        // Replicating search_task logic:
+                                        // Total matches always increments.
+                                        // Nav rows only appends if < limit.
+                                        if nav_rows.len() + matches.len() > MAX_NAV_ROWS {
+                                            batch_limit_reached = true;
+                                        }
+                                    }
+                                }
+                            }
+                            (true, end_idx - row_idx, matches, batch_limit_reached)
+                        }
+                    };
+
+                    // Check cancellation again (if we returned early)
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        let mut results = results.write();
+                        results.status = SearchStatus::Cancelled;
+                        ctx.request_repaint();
+                        return;
+                    }
+
+                    if !should_continue {
+                        break;
+                    }
+
+                    // 2. Update results with this batch
+                    total_matches += chunk_matches.len();
+                    if !nav_limit_reached {
+                        if limit_reached {
+                            nav_limit_reached = true;
+                            // Add remaining space
+                            let space = MAX_NAV_ROWS.saturating_sub(nav_rows.len());
+                            nav_rows.extend(chunk_matches.into_iter().take(space));
+                        } else {
+                            // Check if adding this chunk exceeds limit
+                            if nav_rows.len() + chunk_matches.len() > MAX_NAV_ROWS {
+                                nav_limit_reached = true;
+                                let space = MAX_NAV_ROWS - nav_rows.len();
+                                nav_rows.extend(chunk_matches.into_iter().take(space));
+                            } else {
+                                nav_rows.extend(chunk_matches);
+                            }
+                        }
+                    } else {
+                        // already reached limit, just counting total_matches
+                    }
+
+                    // Update UI progress
+                    if row_idx % 10000 == 0 || !should_continue {
+                        let mut results = results.write();
+                        // We don't update navigation_rows incrementally to avoid UI flicker/resorts?
+                        // Actually search_task doesn't either. It does it at end.
+                        // But we want progress.
+                        results.rows_searched = row_idx + rows_processed;
+                        results.total_match_count = total_matches;
+                        ctx.request_repaint();
+                    }
+
+                    row_idx += rows_processed;
+
+                    // 3. Yield to browser to let UI render
+                    yield_to_browser().await;
+                }
+
+                // Final update
+                let mut results = results.write();
+                results.navigation_rows = nav_rows;
+                results.total_match_count = total_matches;
+                results.rows_searched = row_idx; // Should be total
+                results.status = SearchStatus::Complete;
+                results.nav_limit_reached = nav_limit_reached;
+                ctx.request_repaint();
+            });
+        }
     }
 
     /// Navigate to next matching row
@@ -1547,10 +1834,64 @@ impl FastCsvApp {
             self.row_detail.open = false;
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    fn load_file_web(&mut self, name: String, bytes: Vec<u8>, ctx: egui::Context) {
+        // Reset state
+        self.scroll_y = 0.0;
+        self.scroll_x = 0.0;
+        self.column_widths.clear();
+        self.row_cache.clear();
+        self.last_visible_range = (0, 0);
+        self.sort_state = SortState::default();
+        self.search.cancel_flag.store(true, Ordering::SeqCst);
+        self.search.current_index = 0;
+        self.search.active_query.clear();
+        {
+            let mut results = self.search.results.write();
+            results.navigation_rows.clear();
+            results.total_match_count = 0;
+            results.status = SearchStatus::Idle;
+            results.rows_searched = 0;
+            results.nav_limit_reached = false;
+        }
+
+        // Set loading state
+        {
+            let mut state = self.state.write();
+            state.csv = None;
+            state.load_state = LoadState::Indexing;
+            state.error_message = None;
+            state.rows_indexed.store(0, Ordering::Relaxed);
+            state.cancel_indexing.store(false, Ordering::Relaxed);
+            state.indexing_complete.store(false, Ordering::Relaxed);
+        }
+
+        use csv::init_csv_web;
+        let state = Arc::clone(&self.state);
+        let ctx_clone = ctx.clone();
+
+        // Run synchronously for now
+        let result = init_csv_web(name, bytes, &state, &ctx_clone);
+
+        if let Err(e) = result {
+            let mut state_guard = state.write();
+            state_guard.load_state = LoadState::Error;
+            state_guard.error_message = Some(e);
+            ctx.request_repaint();
+        }
+    }
 }
 
 impl eframe::App for FastCsvApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll file loader channel (WASM only)
+        #[cfg(target_arch = "wasm32")]
+        {
+            while let Ok((name, bytes)) = self.file_loader_rx.try_recv() {
+                self.load_file_web(name, bytes, ctx.clone());
+            }
+        }
+
         // Check for updates on startup (only once)
         if !self.update_state.check_initiated {
             self.update_state.check_initiated = true;
@@ -1604,6 +1945,8 @@ impl eframe::App for FastCsvApp {
                         ui.close();
                         #[cfg(not(target_arch = "wasm32"))]
                         self.open_file(ctx);
+                        #[cfg(target_arch = "wasm32")]
+                        self.open_file_web(ctx.clone());
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {
@@ -1765,6 +2108,8 @@ impl eframe::App for FastCsvApp {
                             if ui.button("📂 Open CSV File").clicked() {
                                 #[cfg(not(target_arch = "wasm32"))]
                                 self.open_file(ctx);
+                                #[cfg(target_arch = "wasm32")]
+                                self.open_file_web(ctx.clone());
                             }
                             ui.add_space(10.0);
                             ui.label("or drag and drop a file here");
@@ -1832,5 +2177,62 @@ impl eframe::App for FastCsvApp {
                 }
             }
         });
+
+        // Handle dropped files (Web)
+        #[cfg(target_arch = "wasm32")]
+        ctx.input(|i| {
+            if !i.raw.dropped_files.is_empty() {
+                let file = &i.raw.dropped_files[0];
+                if let Some(bytes) = &file.bytes {
+                    self.load_file_web(file.name.clone(), bytes.to_vec(), ctx.clone());
+                }
+            }
+        });
     }
+}
+
+// ----------------------------------------------------------------------------
+// Web Entry Point
+// ----------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+use eframe::wasm_bindgen::{self, prelude::*};
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
+    // Redirect panic messages to console.log
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+
+    let web_options = eframe::WebOptions::default();
+
+    let document = web_sys::window().unwrap().document().unwrap();
+    // Remove loading text
+    if let Some(loading_text) = document.get_element_by_id("center_text") {
+        loading_text.remove();
+    }
+
+    let canvas = document
+        .get_element_by_id("the_canvas_id")
+        .expect("Failed to find canvas with id 'the_canvas_id'")
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .unwrap();
+
+    eframe::WebRunner::new()
+        .start(
+            canvas,
+            web_options,
+            Box::new(|cc| {
+                // Add Phosphor icons to fonts
+                let mut fonts = egui::FontDefinitions::default();
+                egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+                cc.egui_ctx.set_fonts(fonts);
+
+                // Follow system theme
+                cc.egui_ctx.set_visuals(egui::Visuals::dark());
+
+                Ok(Box::new(FastCsvApp::default()))
+            }),
+        )
+        .await
 }

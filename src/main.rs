@@ -1,8 +1,11 @@
 //! QuickCSV Native Entry Point
 
+#[cfg(not(target_arch = "wasm32"))]
 use eframe::egui;
+#[cfg(not(target_arch = "wasm32"))]
 use quickcsv::FastCsvApp;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_icon() -> egui::IconData {
     let (icon_rgba, icon_width, icon_height) = {
         let icon_bytes = include_bytes!("../icons/icon-128.png");
@@ -20,6 +23,7 @@ fn load_icon() -> egui::IconData {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let icon = load_icon();
     let options = eframe::NativeOptions {
@@ -48,3 +52,6 @@ fn main() -> eframe::Result<()> {
         }),
     )
 }
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
