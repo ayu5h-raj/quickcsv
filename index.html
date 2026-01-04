@@ -84,16 +84,7 @@
         }
     </style>
     
-    <!-- Google Analytics -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-02EQ3MT9HS"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-
-      gtag('config', 'G-02EQ3MT9HS');
-    </script>
-    
+    <!-- Trunk Rust/WASM loader - MUST be before any script tags -->
     
 <script type="module">
 import init, * as bindings from '/quickcsv/quickcsv-f5090e49429c10ff.js';
@@ -106,6 +97,16 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
+    
+    <!-- Google Analytics -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-02EQ3MT9HS"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-02EQ3MT9HS');
+    </script>
     
     <!-- Error handling and debugging -->
     <script>
@@ -136,7 +137,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
             }
         });
     </script>
-<link rel="modulepreload" href="/quickcsv/quickcsv-f5090e49429c10ff.js" crossorigin="anonymous" integrity="sha384-f/fsCEhKM1PUPAmLQXlzmFUD4TK43hVJ/l34RP8KQYwgbiNTcM6DrwMAYOUef7+F"><link rel="preload" href="/quickcsv/quickcsv-f5090e49429c10ff_bg.wasm" crossorigin="anonymous" integrity="sha384-i3oNxkK2h9kN+fN+cJuZBpxp0CoChXMu7R6vxKLtXXh8odCVvUNTGLB+qAGOBJZV" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/quickcsv/quickcsv-f5090e49429c10ff.js" crossorigin="anonymous" integrity="sha384-79/E0tfLSwlfE/Yc/mKSOgvrdslIt9e0YH8S4jKM3+tBdWkwdvef9tTcYS5hi5wo"><link rel="preload" href="/quickcsv/quickcsv-f5090e49429c10ff_bg.wasm" crossorigin="anonymous" integrity="sha384-eHFS6hAMNRDSGk8zsKS66R9m8H7a7kHJo/dAcDjWhBdF56NGWg6I6NeLtxEovQoY" as="fetch" type="application/wasm"></head>
 
 <body>
     <!-- The WASM code will reside here: -->
