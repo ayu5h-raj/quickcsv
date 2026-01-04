@@ -3,7 +3,7 @@ target = "index.html"
 dist = "dist"
 release = true
 filehash = true
-wasm_opt = ["-Oz", "--enable-bulk-memory"]
+wasm_opt = false
 
 [tools]
 wasm_opt = "version_116"
