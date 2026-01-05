@@ -165,6 +165,40 @@ impl ColumnState {
         }
     }
 
+    /// Hide all columns except the first one (must keep at least one visible)
+    pub fn hide_all_columns(&mut self) {
+        let total_columns = self.column_order.len();
+        if total_columns <= 1 {
+            return; // Nothing to hide
+        }
+
+        // Get columns that are currently visible (excluding already hidden)
+        let visible: Vec<usize> = self
+            .column_order
+            .iter()
+            .filter(|&&idx| !self.hidden_columns.contains(&idx))
+            .copied()
+            .collect();
+
+        if visible.len() <= 1 {
+            return; // Already only one visible
+        }
+
+        // Hide all except the first visible column
+        let to_hide: Vec<usize> = visible.into_iter().skip(1).collect();
+        for &idx in &to_hide {
+            self.hidden_columns.insert(idx);
+        }
+
+        self.push_undo(ColumnAction::Batch(
+            to_hide
+                .iter()
+                .map(|&idx| ColumnAction::HideColumn(idx))
+                .collect(),
+        ));
+        self.clear_redo();
+    }
+
     /// Reset column order to original
     pub fn reset_column_order(&mut self) {
         if self

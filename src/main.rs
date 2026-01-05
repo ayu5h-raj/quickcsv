@@ -838,7 +838,7 @@ impl FastCsvApp {
 
                                     // Header text area (clickable for sorting)
                                     // Note: We get header_rect BEFORE rendering for drop detection
-                                    let header_rect = ui.available_rect_before_wrap();
+                                    let _header_rect = ui.available_rect_before_wrap();
 
                                     // Create clickable header with sort indicator
                                     // Note: sorting uses original column index
@@ -1760,6 +1760,9 @@ impl FastCsvApp {
                 ui.horizontal(|ui| {
                     if ui.button("Show All").clicked() {
                         self.column_state.show_all_columns();
+                    }
+                    if ui.button("Hide All").clicked() {
+                        self.column_state.hide_all_columns();
                     }
                     if ui.button("Reset Order").clicked() {
                         self.column_state.reset_column_order();
