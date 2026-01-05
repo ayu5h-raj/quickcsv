@@ -837,8 +837,8 @@ impl FastCsvApp {
                                     ui.add_space(4.0);
 
                                     // Header text area (clickable for sorting)
+                                    // Note: We get header_rect BEFORE rendering for drop detection
                                     let header_rect = ui.available_rect_before_wrap();
-                                    let header_id = ui.id().with("col_header").with(display_idx);
 
                                     // Create clickable header with sort indicator
                                     // Note: sorting uses original column index
@@ -871,11 +871,13 @@ impl FastCsvApp {
                                         egui::RichText::new(header_text).strong()
                                     };
 
-                                    // Make header clickable for sorting (separate from drag handle)
-                                    let header_response = ui.interact(header_rect, header_id, egui::Sense::click());
+                                    // Render the header text as clickable label and get the response
+                                    let header_response = ui.add(
+                                        egui::Label::new(text).sense(egui::Sense::click())
+                                    );
 
-                                    // Get the full header area (handle + text) for drop detection
-                                    let full_header_rect = drag_handle_rect.union(header_rect);
+                                    // Get the full header area (handle + actual label rect) for drop detection
+                                    let full_header_rect = drag_handle_rect.union(header_response.rect);
 
                                     // Check if this is a drop target for dragging (use pointer position for better detection)
                                     let pointer_pos = ui.ctx().pointer_hover_pos();
@@ -903,15 +905,13 @@ impl FastCsvApp {
                                         );
                                     }
 
-                                    // Render the header text
-                                    ui.label(text);
-
                                     // Handle click for sorting (only if not dragging)
                                     // Prevent sorting if user is dragging or just started a drag
                                     if header_response.clicked()
                                         && !is_sorting
                                         && !is_dragging
-                                        && self.column_state.dragged_column.is_none() {
+                                        && self.column_state.dragged_column.is_none()
+                                    {
                                         clicked_column = Some(original_idx);
                                     }
 
