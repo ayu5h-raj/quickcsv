@@ -1995,7 +1995,7 @@ impl eframe::App for FastCsvApp {
                     }
                 });
                 ui.menu_button("Edit", |ui: &mut egui::Ui| {
-                    if ui.button("Find... (⌘F)").clicked() {
+                    if ui.button("Find... (⌘+F)").clicked() {
                         ui.close();
                         self.search.visible = true;
                         self.search.focus_input = true;
@@ -2016,7 +2016,7 @@ impl eframe::App for FastCsvApp {
                         self.prev_match();
                     }
                     ui.separator();
-                    if ui.button("Go to Row... (⌘L)").clicked() {
+                    if ui.button("Go to Row... (⌘+L)").clicked() {
                         ui.close();
                         self.go_to_row.open = true;
                         self.go_to_row.focus_input = true;
@@ -2024,7 +2024,7 @@ impl eframe::App for FastCsvApp {
                     }
                 });
                 ui.menu_button("View", |ui: &mut egui::Ui| {
-                    if ui.button("Column Manager... (⌘⇧C)").clicked() {
+                    if ui.button("Column Manager... (⌘+Shift+C)").clicked() {
                         ui.close();
                         self.column_state.manager_open = true;
                     }
