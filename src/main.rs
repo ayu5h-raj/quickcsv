@@ -20,8 +20,8 @@ use std::thread;
 // Imports from modules
 use csv::init_csv_progressive;
 use state::{
-    ColumnState, GoToRowState, JsonViewerState, LoadState, RowDetailState, SearchState,
-    SearchStatus, SharedState, SortDirection, SortState, MAX_NAV_ROWS,
+    ColumnState, FilterOperator, FilterState, GoToRowState, JsonViewerState, LoadState,
+    RowDetailState, SearchState, SearchStatus, SharedState, SortDirection, SortState, MAX_NAV_ROWS,
 };
 use update::{check_for_updates, UpdateState};
 use utils::{format_file_size, format_json, format_number, looks_like_json, truncate_for_display};
@@ -68,6 +68,12 @@ struct FastCsvApp {
     update_state: UpdateState,
     /// Column state (visibility, order, undo/redo)
     column_state: ColumnState,
+    /// Filter state for column filtering
+    filter_state: FilterState,
+    /// Cached filtered row indices (empty = no filter active)
+    filtered_indices: Vec<usize>,
+    /// Total row count (before filtering) for status bar
+    total_row_count: usize,
 }
 
 impl Default for FastCsvApp {
@@ -87,6 +93,9 @@ impl Default for FastCsvApp {
             row_detail: RowDetailState::default(),
             update_state: UpdateState::default(),
             column_state: ColumnState::default(),
+            filter_state: FilterState::default(),
+            filtered_indices: Vec::new(),
+            total_row_count: 0,
         }
     }
 }
@@ -922,6 +931,37 @@ impl FastCsvApp {
                                         header_response.on_hover_text("Click to sort");
                                     }
 
+                                    // Filter icon button - shows dropdown on click
+                                    let has_filter = self.filter_state.has_filter(original_idx);
+                                    let filter_icon = if has_filter {
+                                        egui_phosphor::regular::FUNNEL_SIMPLE_X
+                                    } else {
+                                        egui_phosphor::regular::FUNNEL_SIMPLE
+                                    };
+                                    let filter_color = if has_filter {
+                                        Color32::from_rgb(100, 180, 255)
+                                    } else {
+                                        Color32::from_rgb(140, 140, 140)
+                                    };
+                                    let filter_btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new(filter_icon).color(filter_color)
+                                        )
+                                        .frame(false)
+                                    );
+                                    if filter_btn.clicked() {
+                                        if self.filter_state.active_popup == Some(original_idx) {
+                                            self.filter_state.close_popup();
+                                        } else {
+                                            self.filter_state.open_popup(original_idx);
+                                        }
+                                    }
+                                    filter_btn.on_hover_text(if has_filter {
+                                        "Click to edit/clear filter"
+                                    } else {
+                                        "Click to add filter"
+                                    });
+
                                     // Tooltip for drag handle
                                     if drag_response.hovered() {
                                         drag_response.on_hover_text("Drag to reorder column");
@@ -954,6 +994,19 @@ impl FastCsvApp {
                                 self.row_cache.insert(actual_row_idx, fields.clone());
                                 fields
                             };
+
+                            // Check if row matches active filters
+                            let matches_filter = self.filter_state.row_matches(&fields);
+
+                            // If row doesn't match filter, render empty row
+                            if !matches_filter {
+                                // Render empty cells for filtered-out rows
+                                row.col(|_ui| {}); // Row number column
+                                for _ in &visible_columns {
+                                    row.col(|_ui| {});
+                                }
+                                return;
+                            }
 
                             // Check if this is the current navigation row (for special highlighting)
                             let is_current_nav_row = current_nav_row == Some(actual_row_idx);
@@ -1714,6 +1767,108 @@ impl FastCsvApp {
         }
     }
 
+    /// Render the filter popup for a column
+    fn render_filter_popup(&mut self, ctx: &egui::Context) {
+        let Some(col_idx) = self.filter_state.active_popup else {
+            return;
+        };
+
+        // Get column name for title
+        let col_name = {
+            let state = self.state.read();
+            state
+                .csv
+                .as_ref()
+                .and_then(|csv| csv.headers.get(col_idx).cloned())
+                .unwrap_or_else(|| format!("Column {}", col_idx + 1))
+        };
+
+        // Handle Escape to close
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.filter_state.close_popup();
+            return;
+        }
+
+        let mut should_close = false;
+        let mut should_apply = false;
+        let mut should_clear = false;
+
+        egui::Window::new(format!("Filter: {}", col_name))
+            .resizable(false)
+            .collapsible(false)
+            .default_width(250.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+
+                // Operator dropdown
+                ui.horizontal(|ui| {
+                    ui.label("Operator:");
+                    egui::ComboBox::from_id_salt("filter_operator")
+                        .selected_text(self.filter_state.selected_operator.display_name())
+                        .show_ui(ui, |ui| {
+                            for op in FilterOperator::all() {
+                                ui.selectable_value(
+                                    &mut self.filter_state.selected_operator,
+                                    *op,
+                                    op.display_name(),
+                                );
+                            }
+                        });
+                });
+
+                ui.add_space(4.0);
+
+                // Value input (not needed for Empty/NotEmpty)
+                let needs_value = !matches!(
+                    self.filter_state.selected_operator,
+                    FilterOperator::Empty | FilterOperator::NotEmpty
+                );
+                if needs_value {
+                    ui.horizontal(|ui| {
+                        ui.label("Value:");
+                        let response = ui.text_edit_singleline(&mut self.filter_state.filter_input);
+                        // Apply on Enter
+                        if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            should_apply = true;
+                        }
+                    });
+                }
+
+                ui.add_space(8.0);
+
+                // Buttons
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        should_apply = true;
+                    }
+                    if self.filter_state.has_filter(col_idx) {
+                        if ui.button("Clear").clicked() {
+                            should_clear = true;
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+
+        // Handle actions after UI
+        if should_apply {
+            let operator = self.filter_state.selected_operator;
+            let value = self.filter_state.filter_input.clone();
+            self.filter_state.apply_filter(col_idx, operator, value);
+            // Clear row cache when filter changes
+            self.row_cache.clear();
+        } else if should_clear {
+            self.filter_state.clear_filter(col_idx);
+            self.filter_state.close_popup();
+            self.row_cache.clear();
+        } else if should_close {
+            self.filter_state.close_popup();
+        }
+    }
+
     /// Render the Column Manager dialog
     fn render_column_manager(&mut self, ctx: &egui::Context) {
         if !self.column_state.manager_open {
@@ -2213,6 +2368,9 @@ impl eframe::App for FastCsvApp {
 
         // Render Column Manager dialog (if open)
         self.render_column_manager(ctx);
+
+        // Render Filter popup (if open)
+        self.render_filter_popup(ctx);
 
         // Handle dropped files
         ctx.input(|i| {
