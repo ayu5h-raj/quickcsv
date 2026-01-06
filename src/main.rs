@@ -88,6 +88,7 @@ struct FastCsvApp {
             std::collections::HashMap<usize, FilterCondition>,
             Option<usize>,
             SortDirection,
+            std::time::Duration,
         )>,
     >,
     /// Whether filtering is currently in progress
@@ -98,6 +99,8 @@ struct FastCsvApp {
     applied_sort_column: Option<usize>,
     /// Optimization: Sort direction used to generate current result
     applied_sort_direction: SortDirection,
+    /// Duration of last filter operation (for display)
+    filter_duration: Option<std::time::Duration>,
 }
 
 impl Default for FastCsvApp {
@@ -128,6 +131,7 @@ impl Default for FastCsvApp {
             applied_filters: std::collections::HashMap::new(),
             applied_sort_column: None,
             applied_sort_direction: SortDirection::None,
+            filter_duration: None,
         }
     }
 }
@@ -270,6 +274,7 @@ impl FastCsvApp {
         let is_filtering = self.is_filtering.clone();
 
         // Spawn thread
+        let start_time = std::time::Instant::now();
         thread::spawn(move || {
             let total_rows = {
                 let state_guard = state.read();
@@ -322,7 +327,8 @@ impl FastCsvApp {
             }
 
             // Send result with metadata
-            let _ = sender.send((indices, current_filters, sort_col, sort_dir));
+            let duration = start_time.elapsed();
+            let _ = sender.send((indices, current_filters, sort_col, sort_dir, duration));
             is_filtering.store(false, Ordering::Relaxed);
         });
     }
@@ -1393,10 +1399,16 @@ impl FastCsvApp {
                         ui.spinner();
                         ui.label(format!("Filtering... (Rows: {})", format_number(row_count)));
                     } else if let Some(filtered) = &self.filtered_indices {
+                        let duration_text = if let Some(d) = self.filter_duration {
+                            format!(" • {:.2}s", d.as_secs_f64())
+                        } else {
+                            String::new()
+                        };
                         ui.label(format!(
-                            "Rows: {} (of {})",
+                            "Rows: {} (of {}){}",
                             format_number(filtered.len()),
-                            format_number(row_count)
+                            format_number(row_count),
+                            duration_text
                         ))
                         .on_hover_text("Number of rows matching active filters");
                     } else {
@@ -2277,11 +2289,12 @@ impl eframe::App for FastCsvApp {
         // Check for async filtering results
         if let Some(receiver) = &self.filter_receiver {
             match receiver.try_recv() {
-                Ok((indices, filters, sort_col, sort_dir)) => {
+                Ok((indices, filters, sort_col, sort_dir, duration)) => {
                     self.filtered_indices = Some(indices);
                     self.applied_filters = filters;
                     self.applied_sort_column = sort_col;
                     self.applied_sort_direction = sort_dir;
+                    self.filter_duration = Some(duration);
                     self.filter_receiver = None; // Done receiving
                     self.is_filtering.store(false, Ordering::Relaxed);
                     self.row_cache.clear(); // Clear cache for new view
