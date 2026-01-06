@@ -3019,17 +3019,30 @@ impl eframe::App for FastCsvApp {
         self.render_filter_popup(ctx);
 
         // Handle dropped files
+        #[cfg(target_arch = "wasm32")]
+        {
+            let dropped_file: Option<(String, Vec<u8>)> = ctx.input(|i| {
+                if !i.raw.dropped_files.is_empty() {
+                    let file = &i.raw.dropped_files[0];
+                    if let Some(bytes) = &file.bytes {
+                        Some((file.name.clone(), bytes.to_vec()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+            if let Some((name, bytes)) = dropped_file {
+                self.load_file_web(name, bytes, ctx.clone());
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         ctx.input(|i| {
             for file in &i.raw.dropped_files {
-                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(path) = &file.path {
                     self.load_file(path.clone(), ctx.clone());
-                    break;
-                }
-
-                #[cfg(target_arch = "wasm32")]
-                if let Some(bytes) = &file.bytes {
-                    self.load_file_web(file.name.clone(), bytes.to_vec(), ctx.clone());
                     break;
                 }
             }
