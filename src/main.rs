@@ -44,6 +44,24 @@ async fn yield_to_browser() {
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
+/// Get current Unix timestamp (cross-platform)
+fn current_timestamp() -> i64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Use JavaScript Date API for WASM
+        let date = js_sys::Date::new(&wasm_bindgen::JsValue::UNDEFINED);
+        (date.get_time() / 1000.0) as i64 // Convert from milliseconds to seconds
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Use standard library for native
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+}
+
 /// Height of each row in pixels
 const ROW_HEIGHT: f32 = 24.0;
 
@@ -55,6 +73,66 @@ const CURRENT_MATCH_COLOR: Color32 = Color32::from_rgb(255, 120, 0);
 
 /// Default column width
 const DEFAULT_COLUMN_WIDTH: f32 = 150.0;
+
+/// Maximum number of recent files to keep
+const MAX_RECENT_FILES: usize = 20;
+
+/// Recent file entry
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct RecentFile {
+    /// File path (desktop) or file name (web)
+    path: String,
+    /// Display name (filename only)
+    name: String,
+    /// Last accessed timestamp (Unix timestamp)
+    timestamp: i64,
+}
+
+/// Recent files state
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct RecentFiles {
+    files: Vec<RecentFile>,
+}
+
+impl RecentFiles {
+    /// Add a file to recent files list
+    fn add_file(&mut self, path: String, name: String) {
+        // Remove if already exists
+        self.files.retain(|f| f.path != path);
+
+        // Add to end (most recent)
+        self.files.push(RecentFile {
+            path,
+            name,
+            timestamp: current_timestamp(),
+        });
+
+        // Keep only most recent MAX_RECENT_FILES
+        if self.files.len() > MAX_RECENT_FILES {
+            self.files.remove(0);
+        }
+    }
+
+    /// Remove a file from recent files
+    #[allow(dead_code)] // Used in native code only
+    fn remove_file(&mut self, path: &str) {
+        self.files.retain(|f| f.path != path);
+    }
+
+    /// Get recent files sorted by most recent first
+    fn get_recent(&self) -> Vec<RecentFile> {
+        let mut files = self.files.clone();
+        files.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        files
+    }
+
+    /// Validate and clean up recent files (remove non-existent files on desktop)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn validate_desktop(&mut self) {
+        self.files
+            .retain(|f| std::path::Path::new(&f.path).exists());
+    }
+}
 
 /// Main application state
 struct FastCsvApp {
@@ -125,6 +203,13 @@ struct FastCsvApp {
     /// Channel receiver for file data (WASM)
     #[cfg(target_arch = "wasm32")]
     file_loader_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
+    /// Recent files list
+    recent_files: RecentFiles,
+    /// Whether recent files have been loaded from storage
+    recent_files_loaded: bool,
+    /// Whether window has been expanded after file load
+    #[allow(dead_code)] // Used in native code only
+    window_expanded: bool,
 }
 
 impl Default for FastCsvApp {
@@ -163,11 +248,92 @@ impl Default for FastCsvApp {
             file_loader_tx: tx,
             #[cfg(target_arch = "wasm32")]
             file_loader_rx: rx,
+            recent_files: RecentFiles::default(),
+            recent_files_loaded: false,
+            window_expanded: false,
         }
     }
 }
 
 impl FastCsvApp {
+    /// Load recent files from storage
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_recent_files(&mut self) {
+        if let Some(config_dir) = dirs::config_dir() {
+            let recent_files_path = config_dir.join("quickcsv").join("recent_files.json");
+            if recent_files_path.exists() {
+                if let Ok(contents) = std::fs::read_to_string(&recent_files_path) {
+                    if let Ok(files) = serde_json::from_str::<RecentFiles>(&contents) {
+                        self.recent_files = files;
+                        self.recent_files.validate_desktop();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Save recent files to storage
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_recent_files(&self) {
+        if let Some(config_dir) = dirs::config_dir() {
+            let quickcsv_dir = config_dir.join("quickcsv");
+            if std::fs::create_dir_all(&quickcsv_dir).is_err() {
+                return;
+            }
+            let recent_files_path = quickcsv_dir.join("recent_files.json");
+            if let Ok(json) = serde_json::to_string_pretty(&self.recent_files) {
+                let _ = std::fs::write(&recent_files_path, json);
+            }
+        }
+    }
+
+    /// Load recent files from storage (web)
+    #[cfg(target_arch = "wasm32")]
+    fn load_recent_files(&mut self) {
+        if let Some(window) = web_sys::window() {
+            if let Ok(Some(storage)) = window.local_storage() {
+                if let Ok(Some(json)) = storage.get_item("quickcsv_recent_files") {
+                    if let Ok(files) = serde_json::from_str::<RecentFiles>(&json) {
+                        self.recent_files = files;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Save recent files to storage (web)
+    #[cfg(target_arch = "wasm32")]
+    fn save_recent_files(&self) {
+        if let Ok(json) = serde_json::to_string(&self.recent_files) {
+            if let Some(window) = web_sys::window() {
+                if let Ok(Some(storage)) = window.local_storage() {
+                    let _ = storage.set_item("quickcsv_recent_files", &json);
+                }
+            }
+        }
+    }
+
+    /// Open a file from recent files (desktop)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_recent_file(&mut self, path: &str, ctx: &egui::Context) {
+        let path_buf = PathBuf::from(path);
+        if path_buf.exists() {
+            self.load_file(path_buf, ctx.clone());
+        } else {
+            // Remove from recent files if it doesn't exist
+            self.recent_files.remove_file(path);
+            self.save_recent_files();
+        }
+    }
+
+    /// Open a file from recent files (web) - triggers file picker
+    #[cfg(target_arch = "wasm32")]
+    fn open_recent_file(&mut self, _name: &str, ctx: &egui::Context) {
+        // On web, we can't directly open files, so just trigger the file picker
+        // The user will need to select the file again
+        self.open_file(ctx);
+    }
+
     /// Open a file dialog and queue the file for loading (WASM)
     #[cfg(target_arch = "wasm32")]
     fn open_file(&mut self, ctx: &egui::Context) {
@@ -243,13 +409,17 @@ impl FastCsvApp {
 
         // Use init_csv_web for synchronous parsing
         let state = Arc::clone(&self.state);
-        let result = csv::init_csv_web(name, bytes, &state, &ctx);
+        let result = csv::init_csv_web(name.clone(), bytes, &state, &ctx);
 
         if let Err(e) = result {
             let mut state_guard = state.write();
             state_guard.load_state = LoadState::Error;
             state_guard.error_message = Some(e);
             ctx.request_repaint();
+        } else {
+            // Add to recent files
+            self.recent_files.add_file(name.clone(), name);
+            self.save_recent_files();
         }
     }
 
@@ -322,6 +492,16 @@ impl FastCsvApp {
 
         let state = Arc::clone(&self.state);
         let path_clone = path.clone();
+        let path_str = path.to_string_lossy().to_string();
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&path_str)
+            .to_string();
+
+        // Add to recent files
+        self.recent_files.add_file(path_str.clone(), file_name);
+        self.save_recent_files();
 
         // Start progressive loading - shows data immediately while indexing continues
         thread::spawn(move || {
@@ -2784,12 +2964,59 @@ impl eframe::App for FastCsvApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui: &mut egui::Ui| {
                 ui.menu_button("File", |ui: &mut egui::Ui| {
-                    if ui.button("Open...").clicked() {
+                    if ui
+                        .button(format!("{} Open...", egui_phosphor::regular::FOLDER_OPEN))
+                        .clicked()
+                    {
                         ui.close();
                         self.open_file(ctx);
                     }
+
+                    // Open Recent submenu
+                    let recent = self.recent_files.get_recent();
+                    if !recent.is_empty() {
+                        ui.separator();
+                        ui.menu_button(
+                            format!("{} Open Recent", egui_phosphor::regular::CLOCK),
+                            |ui| {
+                                for file in recent.iter().take(10) {
+                                    let label = if file.name.len() > 50 {
+                                        format!("{}...", &file.name[..47])
+                                    } else {
+                                        file.name.clone()
+                                    };
+                                    if ui
+                                        .button(format!(
+                                            "{} {}",
+                                            egui_phosphor::regular::FILE_TEXT,
+                                            label
+                                        ))
+                                        .clicked()
+                                    {
+                                        ui.close();
+                                        self.open_recent_file(&file.path, ctx);
+                                    }
+                                }
+                                if recent.len() > 10 {
+                                    ui.separator();
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "... and {} more",
+                                            recent.len() - 10
+                                        ))
+                                        .small()
+                                        .color(Color32::GRAY),
+                                    );
+                                }
+                            },
+                        );
+                    }
+
                     ui.separator();
-                    if ui.button("Quit").clicked() {
+                    if ui
+                        .button(format!("{} Quit", egui_phosphor::regular::SIGN_OUT))
+                        .clicked()
+                    {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
@@ -2947,17 +3174,137 @@ impl eframe::App for FastCsvApp {
             let load_state = state.load_state;
             drop(state);
 
+            // Expand window when file is loaded (only once, native only)
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if matches!(load_state, LoadState::Ready) && !self.window_expanded {
+                    self.window_expanded = true;
+                    let new_size = [1200.0, 800.0];
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size.into()));
+
+                    // Center the window on the screen
+                    // Get the current viewport position and size to calculate center
+                    let viewport = ctx.input(|i| i.viewport().clone());
+                    if let Some(outer_rect) = viewport.outer_rect {
+                        let current_pos = outer_rect.min;
+                        let current_size = outer_rect.size();
+
+                        // Calculate offset to keep window centered relative to its current position
+                        let offset_x = (new_size[0] - current_size.x) / 2.0;
+                        let offset_y = (new_size[1] - current_size.y) / 2.0;
+                        let new_pos = [
+                            current_pos.x - offset_x,
+                            current_pos.y - offset_y,
+                        ];
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos.into()));
+                    }
+                }
+            }
+
             match load_state {
                 LoadState::Empty => {
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
                             ui.heading("QuickCSV");
-                            ui.add_space(20.0);
-                            if ui.button("📂 Open CSV File").clicked() {
+                            ui.add_space(16.0);
+
+                            // Open file button with icon
+                            if ui
+                                .button(format!(
+                                    "{} Open CSV File",
+                                    egui_phosphor::regular::FOLDER_OPEN
+                                ))
+                                .clicked()
+                            {
                                 self.open_file(ctx);
                             }
-                            ui.add_space(10.0);
-                            ui.label("or drag and drop a file here");
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new("or drag and drop a file here")
+                                    .color(Color32::GRAY)
+                                    .small(),
+                            );
+
+                            // Show recent files if available
+                            let recent = self.recent_files.get_recent();
+                            if !recent.is_empty() {
+                                ui.add_space(24.0);
+                                ui.separator();
+                                ui.add_space(12.0);
+
+                                // Recent Files header
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} Recent Files",
+                                            egui_phosphor::regular::CLOCK
+                                        ))
+                                        .size(14.0)
+                                        .strong(),
+                                    );
+                                });
+                                ui.add_space(8.0);
+
+                                // Recent files list with better styling
+                                egui::Frame::NONE
+                                    .fill(ui.style().visuals.panel_fill)
+                                    .inner_margin(6.0)
+                                    .show(ui, |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .max_height(200.0)
+                                            .show(ui, |ui| {
+                                                for file in recent.iter().take(8) {
+                                                    ui.horizontal(|ui| {
+                                                        // File icon and name button
+                                                        let label = if file.name.len() > 40 {
+                                                            format!("{}...", &file.name[..37])
+                                                        } else {
+                                                            file.name.clone()
+                                                        };
+
+                                                        let button_text = format!(
+                                                            "{} {}",
+                                                            egui_phosphor::regular::FILE_TEXT,
+                                                            label
+                                                        );
+
+                                                        let response = ui
+                                                            .button(button_text)
+                                                            .on_hover_text(&file.path);
+
+                                                        if response.clicked() {
+                                                            self.open_recent_file(&file.path, ctx);
+                                                        }
+
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(egui::Align::Center),
+                                                            |ui| {
+                                                                #[cfg(not(target_arch = "wasm32"))]
+                                                                {
+                                                                    if ui
+                                                                        .small_button(
+                                                                            egui_phosphor::regular::X,
+                                                                        )
+                                                                        .on_hover_text("Remove from recent files")
+                                                                        .clicked()
+                                                                    {
+                                                                        self.recent_files
+                                                                            .remove_file(&file.path);
+                                                                        self.save_recent_files();
+                                                                    }
+                                                                }
+                                                                #[cfg(target_arch = "wasm32")]
+                                                                {
+                                                                    let _ = ui; // Suppress unused warning
+                                                                }
+                                                            },
+                                                        );
+                                                    });
+                                                    ui.add_space(2.0);
+                                                }
+                                            });
+                                    });
+                            }
                         });
                     });
                 }
@@ -3023,16 +3370,17 @@ impl eframe::App for FastCsvApp {
             let dropped_file: Option<(String, Vec<u8>)> = ctx.input(|i| {
                 if !i.raw.dropped_files.is_empty() {
                     let file = &i.raw.dropped_files[0];
-                    if let Some(bytes) = &file.bytes {
-                        Some((file.name.clone(), bytes.to_vec()))
-                    } else {
-                        None
-                    }
+                    file.bytes
+                        .as_ref()
+                        .map(|bytes| (file.name.clone(), bytes.to_vec()))
                 } else {
                     None
                 }
             });
             if let Some((name, bytes)) = dropped_file {
+                // Add to recent files before loading
+                self.recent_files.add_file(name.clone(), name.clone());
+                self.save_recent_files();
                 self.load_file_web(name, bytes, ctx.clone());
             }
         }
@@ -3041,6 +3389,15 @@ impl eframe::App for FastCsvApp {
         ctx.input(|i| {
             for file in &i.raw.dropped_files {
                 if let Some(path) = &file.path {
+                    // Add to recent files before loading
+                    let path_str = path.to_string_lossy().to_string();
+                    let file_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&path_str)
+                        .to_string();
+                    self.recent_files.add_file(path_str, file_name);
+                    self.save_recent_files();
                     self.load_file(path.clone(), ctx.clone());
                     break;
                 }
@@ -3072,8 +3429,8 @@ fn main() -> eframe::Result<()> {
     let icon = load_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([600.0, 400.0])
+            .with_inner_size([700.0, 500.0])
+            .with_min_inner_size([500.0, 350.0])
             .with_title("QuickCSV")
             .with_icon(icon)
             .with_drag_and_drop(true),
@@ -3092,7 +3449,12 @@ fn main() -> eframe::Result<()> {
             // Follow system theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
-            Ok(Box::new(FastCsvApp::default()))
+            // Load recent files from storage
+            let mut app = FastCsvApp::default();
+            app.load_recent_files();
+            app.recent_files_loaded = true;
+
+            Ok(Box::new(app))
         }),
     )
 }
@@ -3136,7 +3498,12 @@ fn main() {
                     // Follow system theme
                     cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
-                    Ok(Box::new(FastCsvApp::default()))
+                    // Load recent files from storage
+                    let mut app = FastCsvApp::default();
+                    app.load_recent_files();
+                    app.recent_files_loaded = true;
+
+                    Ok(Box::new(app))
                 }),
             )
             .await
