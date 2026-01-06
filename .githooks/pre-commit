@@ -1,5 +1,14 @@
 #!/bin/sh
-# Pre-commit hook to run cargo fmt before each commit
+# Pre-commit hook to run cargo fix and cargo fmt before each commit
+
+# First, run cargo fix to automatically fix warnings (unused imports, etc.)
+echo "🔧 Running cargo fix to resolve warnings..."
+cargo fix --bin quickcsv --allow-dirty --allow-staged 2>/dev/null
+if [ $? -eq 0 ]; then
+    echo "✅ Warnings fixed."
+else
+    echo "⚠️  cargo fix had issues, continuing anyway..."
+fi
 
 # Run cargo fmt check
 cargo fmt -- --check

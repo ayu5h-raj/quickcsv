@@ -14,14 +14,15 @@ use eframe::egui::{self, Color32, Key};
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 // Imports from modules
 use csv::init_csv_progressive;
 use state::{
-    GoToRowState, JsonViewerState, LoadState, RowDetailState, SearchState, SearchStatus,
-    SharedState, SortDirection, SortState, MAX_NAV_ROWS,
+    ColumnState, FilterCondition, FilterOperator, FilterState, GoToRowState, JsonViewerState,
+    LoadState, RowDetailState, SearchState, SearchStatus, SharedState, SortDirection, SortState,
+    MAX_NAV_ROWS,
 };
 use update::{check_for_updates, UpdateState};
 use utils::{format_file_size, format_json, format_number, looks_like_json, truncate_for_display};
@@ -66,6 +67,41 @@ struct FastCsvApp {
     row_detail: RowDetailState,
     /// Update checker state
     update_state: UpdateState,
+    /// Column state (visibility, order, undo/redo)
+    column_state: ColumnState,
+    /// Filter state for column filtering
+    filter_state: FilterState,
+    /// Cached filtered row indices (None = no filter, Some = indices that pass filter)
+    filtered_indices: Option<Vec<usize>>,
+    /// Total row count (before filtering) for status bar
+    total_row_count: usize,
+    /// Filter version (increments when filter changes, used to trigger recompute)
+    filter_version: u32,
+    /// Last computed filter version (to detect when recompute is needed)
+    last_filter_version: u32,
+    /// Track previous sorting state to detect completion
+    was_sorting: bool,
+    /// Channel to receive filtered indices from background thread
+    #[allow(clippy::type_complexity)]
+    filter_receiver: Option<
+        mpsc::Receiver<(
+            Vec<usize>,
+            std::collections::HashMap<usize, FilterCondition>,
+            Option<usize>,
+            SortDirection,
+            std::time::Duration,
+        )>,
+    >,
+    /// Whether filtering is currently in progress
+    is_filtering: Arc<AtomicBool>,
+    /// Optimization: Filters that were applied to generate current result
+    applied_filters: std::collections::HashMap<usize, FilterCondition>,
+    /// Optimization: Sort column used to generate current result
+    applied_sort_column: Option<usize>,
+    /// Optimization: Sort direction used to generate current result
+    applied_sort_direction: SortDirection,
+    /// Duration of last filter operation (for display)
+    filter_duration: Option<std::time::Duration>,
 }
 
 impl Default for FastCsvApp {
@@ -84,6 +120,19 @@ impl Default for FastCsvApp {
             go_to_row: GoToRowState::default(),
             row_detail: RowDetailState::default(),
             update_state: UpdateState::default(),
+            column_state: ColumnState::default(),
+            filter_state: FilterState::default(),
+            filtered_indices: None,
+            total_row_count: 0,
+            filter_version: 0,
+            last_filter_version: 0,
+            was_sorting: false,
+            filter_receiver: None,
+            is_filtering: Arc::new(AtomicBool::new(false)),
+            applied_filters: std::collections::HashMap::new(),
+            applied_sort_column: None,
+            applied_sort_direction: SortDirection::None,
+            filter_duration: None,
         }
     }
 }
@@ -117,6 +166,19 @@ impl FastCsvApp {
         self.last_visible_range = (0, 0);
         // Reset sort state
         self.sort_state = SortState::default();
+        // Reset column state (visibility, order)
+        self.column_state = ColumnState::default();
+        // Reset filter state
+        self.filter_state = FilterState::default();
+        self.filtered_indices = None;
+        self.filter_version = 0;
+        self.last_filter_version = 0;
+        self.filter_receiver = None;
+        self.is_filtering.store(false, Ordering::Relaxed);
+        self.applied_filters.clear();
+        self.applied_sort_column = None;
+        self.applied_sort_direction = SortDirection::None;
+        self.filter_duration = None;
         // Cancel any ongoing search and clear results
         self.search.cancel_flag.store(true, Ordering::SeqCst);
         self.search.current_index = 0;
@@ -157,10 +219,141 @@ impl FastCsvApp {
         });
     }
 
+    /// Increment filter version to trigger recompute
+    fn mark_filter_changed(&mut self) {
+        self.filter_version = self.filter_version.wrapping_add(1);
+        // Don't clear indices/cache here to avoid flashing content.
+        // They will be updated when async task completes.
+    }
+
+    /// Start async filtering task
+    fn start_async_filtering(&mut self) {
+        // If no filters are active, clear filtered indices immediately
+        if !self.filter_state.has_active_filters() {
+            self.filtered_indices = None;
+            self.last_filter_version = self.filter_version;
+            self.applied_filters.clear(); // Clear applied state
+            return;
+        }
+
+        // Check if we are already filtering
+        if self.is_filtering.load(Ordering::Relaxed) {
+            // If already filtering, maybe we should cancel previous?
+            // For now, simple implementation: just start new one, late comer wins visually
+            // but cleaner would be cancellation.
+        }
+
+        self.is_filtering.store(true, Ordering::Relaxed);
+        self.last_filter_version = self.filter_version;
+
+        // Clone state for thread
+        let state = self.state.clone();
+        let filter_state = self.filter_state.clone();
+
+        // Snapshot current state for optimization check and return
+        let current_filters = self.filter_state.filters.clone();
+        let sort_col = self.sort_state.column;
+        let sort_dir = self.sort_state.direction;
+
+        // Check for optimization:
+        let can_optimize = self.filtered_indices.is_some()
+            && self.applied_sort_column == sort_col
+            && self.applied_sort_direction == sort_dir
+            && current_filters.len() > self.applied_filters.len()
+            && self
+                .applied_filters
+                .iter()
+                .all(|(k, v)| current_filters.get(k) == Some(v));
+
+        let initial_indices = if can_optimize {
+            self.filtered_indices.clone()
+        } else {
+            None
+        };
+
+        // Capture sort state for consistent ordering
+        let sorted_indices = {
+            let guard = self.sort_state.sorted_indices.read();
+            if self.sort_state.direction != SortDirection::None && !guard.is_empty() {
+                Some(guard.clone())
+            } else {
+                None
+            }
+        };
+
+        // Create channel
+        let (sender, receiver) = mpsc::channel();
+        self.filter_receiver = Some(receiver);
+
+        let is_filtering = self.is_filtering.clone();
+
+        // Spawn thread
+        let start_time = std::time::Instant::now();
+        thread::spawn(move || {
+            let total_rows = {
+                let state_guard = state.read();
+                match &state_guard.csv {
+                    Some(csv) => csv.indexed_row_count(),
+                    None => {
+                        is_filtering.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            };
+
+            let mut indices = Vec::new();
+            {
+                let state_guard = state.read();
+                if let Some(csv) = &state_guard.csv {
+                    if let Some(initial) = initial_indices {
+                        // OPTIMIZATION: Iterate only over previously filtered rows
+                        for &row_idx in initial.iter() {
+                            if row_idx < total_rows {
+                                if let Some(fields) = csv.parse_row(row_idx) {
+                                    if filter_state.row_matches(&fields) {
+                                        indices.push(row_idx);
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(sorted) = sorted_indices {
+                        // Iterate in sorted order
+                        for &row_idx in sorted.iter() {
+                            if row_idx < total_rows {
+                                if let Some(fields) = csv.parse_row(row_idx) {
+                                    if filter_state.row_matches(&fields) {
+                                        indices.push(row_idx);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Iterate in natural order
+                        for row_idx in 0..total_rows {
+                            if let Some(fields) = csv.parse_row(row_idx) {
+                                if filter_state.row_matches(&fields) {
+                                    indices.push(row_idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Send result with metadata
+            let duration = start_time.elapsed();
+            let _ = sender.send((indices, current_filters, sort_col, sort_dir, duration));
+            is_filtering.store(false, Ordering::Relaxed);
+        });
+    }
+
     /// Sort data by column
     ///
     /// Clicking the same column cycles through: None -> Ascending -> Descending -> None
     /// Clicking a different column starts with Ascending
+    ///
+    /// Note: Sorting uses the original column index, so it works on the actual data
+    /// regardless of whether the column is currently visible or hidden.
     fn sort_by_column(&mut self, col_idx: usize, ctx: &egui::Context) {
         // If already sorting, ignore click
         if self.sort_state.is_sorting.load(Ordering::Relaxed) {
@@ -314,12 +507,13 @@ impl FastCsvApp {
         }
     }
 
-    /// Execute search across all columns in a background thread
+    /// Execute search across visible columns only in a background thread
     ///
     /// This search is optimized for large files:
     /// - Counts ALL matches (no limit) for accurate totals
     /// - Only stores limited navigation rows (for prev/next)
     /// - Highlighting is done on-the-fly during rendering
+    /// - Only searches visible columns (respects column visibility settings)
     fn execute_search(&mut self, ctx: &egui::Context) {
         let query = self.search.query.trim().to_lowercase();
 
@@ -358,14 +552,32 @@ impl FastCsvApp {
         self.search.current_index = 0;
         self.search.active_query = query.clone();
 
-        // Get total rows for progress
-        let total_rows = {
-            let state = self.state.read();
-            state
-                .csv
-                .as_ref()
-                .map(|c| c.indexed_row_count())
-                .unwrap_or(0)
+        // Get total rows and visible columns for progress
+        let (total_rows, visible_columns) = {
+            let num_columns = {
+                let state = self.state.read();
+                state.csv.as_ref().map(|c| c.headers.len()).unwrap_or(0)
+            };
+
+            // Initialize column order if needed
+            if num_columns > 0 {
+                self.column_state.init_column_order(num_columns);
+            }
+
+            // Get visible columns (original indices)
+            let visible = self.column_state.get_visible_columns();
+
+            // Get total rows
+            let total = {
+                let state = self.state.read();
+                state
+                    .csv
+                    .as_ref()
+                    .map(|c| c.indexed_row_count())
+                    .unwrap_or(0)
+            };
+
+            (total, visible)
         };
 
         // Initialize results
@@ -383,6 +595,7 @@ impl FastCsvApp {
         let state = Arc::clone(&self.state);
         let results = Arc::clone(&self.search.results);
         let ctx = ctx.clone();
+        let visible_cols = visible_columns; // Clone for thread
 
         // Spawn background search thread
         thread::spawn(move || {
@@ -411,13 +624,17 @@ impl FastCsvApp {
                     return;
                 }
 
-                // Parse and search the row
+                // Parse and search the row (only in visible columns)
                 if let Some(fields) = csv.parse_row(row_idx) {
                     let mut row_has_match = false;
-                    for field in fields.iter() {
-                        if field.to_lowercase().contains(&query) {
-                            total_matches += 1;
-                            row_has_match = true;
+                    // Only search visible columns
+                    for &col_idx in &visible_cols {
+                        if col_idx < fields.len() {
+                            let field = &fields[col_idx];
+                            if field.to_lowercase().contains(&query) {
+                                total_matches += 1;
+                                row_has_match = true;
+                            }
                         }
                     }
 
@@ -500,7 +717,7 @@ impl FastCsvApp {
             // Search input field
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.search.query)
-                    .hint_text("Search all columns...")
+                    .hint_text("Search visible columns...")
                     .desired_width(250.0),
             );
 
@@ -673,9 +890,38 @@ impl FastCsvApp {
             }
         };
 
-        // Ensure we have column widths
-        if self.column_widths.len() != num_columns {
-            self.column_widths = vec![DEFAULT_COLUMN_WIDTH; num_columns];
+        // Store total row count for status bar
+        self.total_row_count = total_rows;
+
+        // Check if sorting just finished
+        let is_sorting = self.sort_state.is_sorting.load(Ordering::Relaxed);
+        if self.was_sorting && !is_sorting {
+            // Sorting finished, need to recompute filtered indices in sorted order
+            self.mark_filter_changed();
+        }
+        self.was_sorting = is_sorting;
+
+        // Recompute filtered indices if filter changed
+        if self.filter_version != self.last_filter_version {
+            self.start_async_filtering();
+        }
+
+        // Determine effective row count (filtered or total)
+        let display_rows = match &self.filtered_indices {
+            Some(indices) => indices.len(),
+            None => total_rows,
+        };
+
+        // Initialize column state if needed
+        self.column_state.init_column_order(num_columns);
+
+        // Get visible columns in display order
+        let visible_columns = self.column_state.get_visible_columns();
+        let num_visible = visible_columns.len();
+
+        // Ensure we have column widths for visible columns only
+        if self.column_widths.len() != num_visible {
+            self.column_widths = vec![DEFAULT_COLUMN_WIDTH; num_visible];
         }
 
         let _text_color = ui.style().visuals.text_color();
@@ -707,7 +953,7 @@ impl FastCsvApp {
                 // Add row number column (fixed width, not resizable)
                 table = table.column(Column::exact(60.0).clip(true));
 
-                // Add data columns with initial width - use clip(true) to prevent overflow
+                // Add visible data columns in display order - use clip(true) to prevent overflow
                 for col_width in &self.column_widths {
                     table = table.column(Column::initial(*col_width).resizable(true).clip(true));
                 }
@@ -730,6 +976,9 @@ impl FastCsvApp {
                 let mut clicked_column: Option<usize> = None;
                 // Track which row's detail popup should be opened
                 let mut row_to_open_detail: Option<usize> = None;
+                // Track drop target for column reordering
+                let mut drop_target_idx: Option<usize> = None;
+
                 let current_sort_col = self.sort_state.column;
                 let current_sort_dir = self.sort_state.direction;
                 let is_sorting = self.sort_state.is_sorting.load(Ordering::Relaxed);
@@ -742,62 +991,195 @@ impl FastCsvApp {
                             ui.label(egui::RichText::new("#").strong());
                         });
 
-                        // Data column headers
-                        for (col_idx, col_name) in headers.iter().enumerate() {
+                        // Data column headers (only visible columns in display order)
+                        for (display_idx, &original_idx) in visible_columns.iter().enumerate() {
+                            if original_idx >= headers.len() {
+                                continue;
+                            }
+                            let col_name = &headers[original_idx];
                             header.col(|ui| {
-                                // Create clickable header with sort indicator
-                                let sort_indicator = if current_sort_col == Some(col_idx) {
-                                    if is_sorting {
-                                        format!(" ({sort_progress}%)")
+                                ui.horizontal(|ui| {
+                                    // Drag handle using Phosphor icon - always visible
+                                    // Allocate actual layout space for the drag handle
+                                    let drag_handle_size = egui::vec2(20.0, ROW_HEIGHT);
+                                    let (drag_handle_rect, drag_response) = ui.allocate_exact_size(
+                                        drag_handle_size,
+                                        egui::Sense::drag()
+                                    );
+
+                                    // Track drag state
+                                    if drag_response.drag_started() {
+                                        self.column_state.dragged_column = Some(display_idx);
+                                    }
+
+                                    // Check drag state
+                                    let is_dragging = self.column_state.dragged_column.is_some();
+                                    let is_being_dragged = self.column_state.dragged_column == Some(display_idx);
+
+                                    // Visual feedback - highlight when dragging or hovered
+                                    let handle_color = if is_being_dragged {
+                                        Color32::from_rgb(100, 180, 255)
+                                    } else if drag_response.hovered() {
+                                        Color32::from_rgb(180, 180, 180)
                                     } else {
-                                        match current_sort_dir {
-                                            SortDirection::Ascending => {
-                                                format!(" {}", egui_phosphor::regular::ARROW_UP)
+                                        Color32::from_rgb(140, 140, 140)
+                                    };
+
+                                    // Add background when hovered/dragging
+                                    if drag_response.hovered() || is_being_dragged {
+                                        ui.painter().rect_filled(
+                                            drag_handle_rect,
+                                            2.0,
+                                            Color32::from_rgba_unmultiplied(60, 60, 60, 100),
+                                        );
+                                    }
+
+                                    // Draw the drag handle icon (DOTS_SIX_VERTICAL is more traditional for drag)
+                                    ui.painter().text(
+                                        drag_handle_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        egui_phosphor::regular::DOTS_SIX_VERTICAL,
+                                        egui::TextStyle::Body.resolve(ui.style()),
+                                        handle_color,
+                                    );
+
+                                    ui.add_space(4.0);
+
+                                    // Header text area (clickable for sorting)
+                                    // Note: We get header_rect BEFORE rendering for drop detection
+                                    let _header_rect = ui.available_rect_before_wrap();
+
+                                    // Create clickable header with sort indicator
+                                    // Note: sorting uses original column index
+                                    let sort_indicator = if current_sort_col == Some(original_idx) {
+                                        if is_sorting {
+                                            format!(" ({sort_progress}%)")
+                                        } else {
+                                            match current_sort_dir {
+                                                SortDirection::Ascending => {
+                                                    format!(" {}", egui_phosphor::regular::ARROW_UP)
+                                                }
+                                                SortDirection::Descending => {
+                                                    format!(" {}", egui_phosphor::regular::ARROW_DOWN)
+                                                }
+                                                SortDirection::None => String::new(),
                                             }
-                                            SortDirection::Descending => {
-                                                format!(" {}", egui_phosphor::regular::ARROW_DOWN)
-                                            }
-                                            SortDirection::None => String::new(),
+                                        }
+                                    } else {
+                                        String::new()
+                                    };
+
+                                    let header_text = format!("{col_name}{sort_indicator}");
+
+                                    // Dim text if sorting in progress
+                                    let text = if is_sorting && current_sort_col == Some(original_idx) {
+                                        egui::RichText::new(header_text)
+                                            .strong()
+                                            .color(Color32::from_rgb(100, 180, 255))
+                                    } else {
+                                        egui::RichText::new(header_text).strong()
+                                    };
+
+                                    // Render the header text as clickable label and get the response
+                                    let header_response = ui.add(
+                                        egui::Label::new(text).sense(egui::Sense::click())
+                                    );
+
+                                    // Get the full header area (handle + actual label rect) for drop detection
+                                    let full_header_rect = drag_handle_rect.union(header_response.rect);
+
+                                    // Check if this is a drop target for dragging (use pointer position for better detection)
+                                    let pointer_pos = ui.ctx().pointer_hover_pos();
+                                    let is_drop_target = is_dragging
+                                        && !is_being_dragged
+                                        && pointer_pos.is_some_and(|pos| full_header_rect.contains(pos));
+
+                                    // Track this column as potential drop target
+                                    if is_drop_target {
+                                        drop_target_idx = Some(display_idx);
+                                    }
+
+                                    // Visual feedback for drop target
+                                    if is_being_dragged {
+                                        ui.painter().rect_filled(
+                                            full_header_rect,
+                                            0.0,
+                                            Color32::from_rgba_unmultiplied(100, 180, 255, 100),
+                                        );
+                                    } else if is_drop_target {
+                                        ui.painter().rect_filled(
+                                            full_header_rect,
+                                            0.0,
+                                            Color32::from_rgba_unmultiplied(255, 200, 0, 100),
+                                        );
+                                    }
+
+                                    // Handle click for sorting (only if not dragging)
+                                    // Prevent sorting if user is dragging or just started a drag
+                                    if header_response.clicked()
+                                        && !is_sorting
+                                        && !is_dragging
+                                        && self.column_state.dragged_column.is_none()
+                                    {
+                                        clicked_column = Some(original_idx);
+                                    }
+
+                                    // Show tooltip
+                                    if is_sorting {
+                                        header_response.on_hover_text("Sorting in progress...");
+                                    } else {
+                                        header_response.on_hover_text("Click to sort");
+                                    }
+
+                                    // Filter icon button - shows dropdown on click
+                                    let has_filter = self.filter_state.has_filter(original_idx);
+                                    let filter_icon = if has_filter {
+                                        egui_phosphor::regular::FUNNEL_SIMPLE_X
+                                    } else {
+                                        egui_phosphor::regular::FUNNEL_SIMPLE
+                                    };
+                                    let filter_color = if has_filter {
+                                        Color32::from_rgb(100, 180, 255)
+                                    } else {
+                                        Color32::from_rgb(140, 140, 140)
+                                    };
+                                    let filter_btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new(filter_icon).color(filter_color)
+                                        )
+                                        .frame(false)
+                                    );
+                                    if filter_btn.clicked() {
+                                        if self.filter_state.active_popup == Some(original_idx) {
+                                            self.filter_state.close_popup();
+                                        } else {
+                                            self.filter_state.open_popup(original_idx);
                                         }
                                     }
-                                } else {
-                                    String::new()
-                                };
+                                    filter_btn.on_hover_text(if has_filter {
+                                        "Click to edit/clear filter"
+                                    } else {
+                                        "Click to add filter"
+                                    });
 
-                                let header_text = format!("{col_name}{sort_indicator}");
-
-                                // Dim text if sorting in progress
-                                let text = if is_sorting && current_sort_col == Some(col_idx) {
-                                    egui::RichText::new(header_text)
-                                        .strong()
-                                        .color(Color32::from_rgb(100, 180, 255))
-                                } else {
-                                    egui::RichText::new(header_text).strong()
-                                };
-
-                                let response =
-                                    ui.add(egui::Label::new(text).sense(egui::Sense::click()));
-
-                                // Only allow clicks when not sorting
-                                if response.clicked() && !is_sorting {
-                                    clicked_column = Some(col_idx);
-                                }
-
-                                // Show tooltip
-                                if is_sorting {
-                                    response.on_hover_text("Sorting in progress...");
-                                } else {
-                                    response.on_hover_text("Click to sort");
-                                }
+                                    // Tooltip for drag handle
+                                    if drag_response.hovered() {
+                                        drag_response.on_hover_text("Drag to reorder column");
+                                    }
+                                });
                             });
                         }
                     })
                     .body(|body| {
-                        body.rows(ROW_HEIGHT, total_rows, |mut row| {
+                        body.rows(ROW_HEIGHT, display_rows, |mut row| {
                             let display_idx = row.index();
 
-                            // Map display index to actual row index (for sorting)
-                            let actual_row_idx = self.get_actual_row_index(display_idx);
+                            // Determine actual row index (filtered or sorted or original)
+                            let actual_row_idx = if let Some(indices) = &self.filtered_indices {
+                                *indices.get(display_idx).unwrap_or(&0)
+                            } else {
+                                self.get_actual_row_index(display_idx)
+                            };
 
                             // Get or parse row data (cache by actual row index)
                             let fields = if let Some(cached) = self.row_cache.get(&actual_row_idx) {
@@ -852,9 +1234,18 @@ impl FastCsvApp {
                                 response.on_hover_text("Double-click to view row details");
                             });
 
-                            // Render each cell with ON-THE-FLY search highlighting
-                            // This is O(visible_rows) per frame - no memory overhead!
-                            for (col_idx, field) in fields.iter().enumerate() {
+                            // Render each visible cell with ON-THE-FLY search highlighting
+                            // Iterate over visible columns in display order
+                            for &original_idx in visible_columns.iter() {
+                                if original_idx >= fields.len() {
+                                    // Column doesn't exist in this row, render empty cell
+                                    row.col(|ui| {
+                                        ui.label("");
+                                    });
+                                    continue;
+                                }
+
+                                let field = &fields[original_idx];
                                 row.col(|ui| {
                                     // Check if this cell matches the search query
                                     // Optimization: skip expensive to_lowercase on huge fields
@@ -879,7 +1270,7 @@ impl FastCsvApp {
                                             egui::Label::new(
                                                 egui::RichText::new(display_text.as_ref()).color(Color32::BLACK),
                                             )
-                                            .sense(egui::Sense::click()),
+                                                .sense(egui::Sense::click()),
                                         )
                                     } else if is_match {
                                         // Other matches - yellow background
@@ -889,7 +1280,7 @@ impl FastCsvApp {
                                             egui::Label::new(
                                                 egui::RichText::new(display_text.as_ref()).color(Color32::BLACK),
                                             )
-                                            .sense(egui::Sense::click()),
+                                                .sense(egui::Sense::click()),
                                         )
                                     } else if is_goto_highlighted {
                                         // Go-to-row highlight - blue background
@@ -899,7 +1290,7 @@ impl FastCsvApp {
                                             egui::Label::new(
                                                 egui::RichText::new(display_text.as_ref()).color(Color32::WHITE),
                                             )
-                                            .sense(egui::Sense::click()),
+                                                .sense(egui::Sense::click()),
                                         )
                                     } else if is_json {
                                         // JSON content - show with subtle indicator
@@ -908,7 +1299,7 @@ impl FastCsvApp {
                                                 egui::RichText::new(display_text.as_ref())
                                                     .color(Color32::from_rgb(100, 180, 255)),
                                             )
-                                            .sense(egui::Sense::click()),
+                                                .sense(egui::Sense::click()),
                                         )
                                     } else {
                                         ui.add(egui::Label::new(display_text.as_ref()).sense(egui::Sense::click()))
@@ -921,11 +1312,11 @@ impl FastCsvApp {
 
                                     // Handle double-click to open cell viewer (works for any cell)
                                     if response.double_clicked() {
-                                        // Get column name
+                                        // Get column name (use original index)
                                         let col_name = headers
-                                            .get(col_idx)
+                                            .get(original_idx)
                                             .cloned()
-                                            .unwrap_or_else(|| format!("Column {col_idx}"));
+                                            .unwrap_or_else(|| format!("Column {}", original_idx + 1));
 
                                         // Try to format as JSON if it looks like JSON
                                         let formatted =
@@ -938,7 +1329,7 @@ impl FastCsvApp {
                                         self.json_viewer.is_valid_json =
                                             is_json && formatted.is_some();
                                         self.json_viewer.row = actual_row_idx;
-                                        self.json_viewer.col = col_idx;
+                                        self.json_viewer.col = original_idx; // Store original index
                                         self.json_viewer.column_name = col_name;
                                     }
 
@@ -957,18 +1348,28 @@ impl FastCsvApp {
                                 });
                             }
 
-                            // Fill remaining columns if row has fewer fields than headers
-                            for _ in fields.len()..num_columns {
-                                row.col(|ui| {
-                                    ui.label("");
-                                });
-                            }
+                            // Note: We don't need to fill remaining columns anymore
+                            // since we only render visible columns
                         });
                     });
 
                 // Handle column header click for sorting (after table is built)
                 if let Some(col_idx) = clicked_column {
                     self.sort_by_column(col_idx, ui.ctx());
+                }
+
+                // Handle column drop for reordering
+                // Check if pointer was released while we have a dragged column
+                let pointer_released = ui.input(|i| i.pointer.any_released());
+                if pointer_released {
+                    if let Some(dragged) = self.column_state.dragged_column {
+                        if let Some(target) = drop_target_idx {
+                            if dragged != target {
+                                self.column_state.reorder_visible_columns(dragged, target);
+                            }
+                        }
+                        self.column_state.dragged_column = None;
+                    }
                 }
 
                 // Handle row number double-click for row detail popup
@@ -1003,10 +1404,27 @@ impl FastCsvApp {
                 if let Some(csv) = &state.csv {
                     let row_count = csv.indexed_row_count();
                     let is_still_indexing = !state.indexing_complete.load(Ordering::Relaxed);
+                    let is_filtering = self.is_filtering.load(Ordering::Relaxed);
 
                     if is_still_indexing {
                         ui.spinner();
                         ui.label(format!("Rows: {}...", format_number(row_count)));
+                    } else if is_filtering {
+                        ui.spinner();
+                        ui.label(format!("Filtering... (Rows: {})", format_number(row_count)));
+                    } else if let Some(filtered) = &self.filtered_indices {
+                        let duration_text = if let Some(d) = self.filter_duration {
+                            format!(" • {:.2}s", d.as_secs_f64())
+                        } else {
+                            String::new()
+                        };
+                        ui.label(format!(
+                            "Rows: {} (of {}){}",
+                            format_number(filtered.len()),
+                            format_number(row_count),
+                            duration_text
+                        ))
+                        .on_hover_text("Number of rows matching active filters");
                     } else {
                         ui.label(format!("Rows: {}", format_number(row_count)));
                     }
@@ -1556,6 +1974,316 @@ impl FastCsvApp {
             self.row_detail.open = false;
         }
     }
+
+    /// Render the filter popup for a column
+    fn render_filter_popup(&mut self, ctx: &egui::Context) {
+        let Some(col_idx) = self.filter_state.active_popup else {
+            return;
+        };
+
+        // Get column name for title
+        let col_name = {
+            let state = self.state.read();
+            state
+                .csv
+                .as_ref()
+                .and_then(|csv| csv.headers.get(col_idx).cloned())
+                .unwrap_or_else(|| format!("Column {}", col_idx + 1))
+        };
+
+        // Handle Escape to close
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.filter_state.close_popup();
+            return;
+        }
+
+        let mut should_close = false;
+        let mut should_apply = false;
+        let mut should_clear = false;
+
+        egui::Window::new(format!("Filter: {}", col_name))
+            .resizable(false)
+            .collapsible(false)
+            .default_width(250.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+
+                // Operator dropdown
+                ui.horizontal(|ui| {
+                    ui.label("Operator:");
+                    egui::ComboBox::from_id_salt("filter_operator")
+                        .selected_text(self.filter_state.selected_operator.display_name())
+                        .show_ui(ui, |ui| {
+                            for op in FilterOperator::all() {
+                                ui.selectable_value(
+                                    &mut self.filter_state.selected_operator,
+                                    *op,
+                                    op.display_name(),
+                                );
+                            }
+                        });
+                });
+
+                ui.add_space(4.0);
+
+                // Value input (not needed for Empty/NotEmpty)
+                let needs_value = !matches!(
+                    self.filter_state.selected_operator,
+                    FilterOperator::Empty | FilterOperator::NotEmpty
+                );
+                if needs_value {
+                    ui.horizontal(|ui| {
+                        ui.label("Value:");
+                        let response = ui.text_edit_singleline(&mut self.filter_state.filter_input);
+                        // Apply on Enter
+                        if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            should_apply = true;
+                        }
+                    });
+                }
+
+                ui.add_space(8.0);
+
+                // Buttons
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        should_apply = true;
+                    }
+                    if self.filter_state.has_filter(col_idx) && ui.button("Clear").clicked() {
+                        should_clear = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+
+        // Handle actions after UI
+        if should_apply {
+            let operator = self.filter_state.selected_operator;
+            let value = self.filter_state.filter_input.clone();
+            self.filter_state.apply_filter(col_idx, operator, value);
+            self.mark_filter_changed();
+        } else if should_clear {
+            self.filter_state.clear_filter(col_idx);
+            self.filter_state.close_popup();
+            self.mark_filter_changed();
+        } else if should_close {
+            self.filter_state.close_popup();
+        }
+    }
+
+    /// Render the Column Manager dialog
+    fn render_column_manager(&mut self, ctx: &egui::Context) {
+        if !self.column_state.manager_open {
+            return;
+        }
+
+        // Handle Escape to close
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.column_state.manager_open = false;
+            return;
+        }
+
+        // Get headers from state
+        let headers = {
+            let state = self.state.read();
+            state
+                .csv
+                .as_ref()
+                .map(|c| c.headers.clone())
+                .unwrap_or_default()
+        };
+
+        if headers.is_empty() {
+            self.column_state.manager_open = false;
+            return;
+        }
+
+        // Initialize column order if needed
+        self.column_state.init_column_order(headers.len());
+
+        let mut should_close = false;
+        let mut move_up: Option<usize> = None;
+        let mut move_down: Option<usize> = None;
+
+        egui::Window::new("Column Manager")
+            .default_size([400.0, 500.0])
+            .resizable(true)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+
+                // Action buttons at top
+                ui.horizontal(|ui| {
+                    if ui.button("Show All").clicked() {
+                        self.column_state.show_all_columns();
+                    }
+                    if ui.button("Hide All").clicked() {
+                        self.column_state.hide_all_columns();
+                    }
+                    if ui.button("Reset Order").clicked() {
+                        self.column_state.reset_column_order();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let undo_enabled = !self.column_state.undo_stack.is_empty();
+                        let redo_enabled = !self.column_state.redo_stack.is_empty();
+
+                        if ui
+                            .add_enabled(redo_enabled, egui::Button::new("Redo"))
+                            .clicked()
+                        {
+                            self.column_state.redo();
+                        }
+                        if ui
+                            .add_enabled(undo_enabled, egui::Button::new("Undo"))
+                            .clicked()
+                        {
+                            self.column_state.undo();
+                        }
+                    });
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Column list
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(350.0)
+                    .show(ui, |ui| {
+                        // Show columns in their current display order
+                        let column_order = self.column_state.column_order.clone();
+                        let visible_columns = self.column_state.get_visible_columns();
+
+                        // Build a map: original_idx -> visible_index
+                        let original_to_visible: std::collections::HashMap<usize, usize> = visible_columns
+                            .iter()
+                            .enumerate()
+                            .map(|(vis_idx, &orig_idx)| (orig_idx, vis_idx))
+                            .collect();
+
+                        for &original_idx in column_order.iter() {
+                            if original_idx >= headers.len() {
+                                continue;
+                            }
+
+                            let header = &headers[original_idx];
+                            let is_hidden = self.column_state.hidden_columns.contains(&original_idx);
+                            let visible_idx = original_to_visible.get(&original_idx);
+
+                            ui.horizontal(|ui| {
+                                // Visibility checkbox
+                                let mut visible = !is_hidden;
+                                if ui.checkbox(&mut visible, "").changed() {
+                                    self.column_state.toggle_column(original_idx);
+                                }
+
+                                // Column name
+                                let mut text = egui::RichText::new(header);
+                                if is_hidden {
+                                    text = text.strikethrough().color(Color32::GRAY);
+                                } else {
+                                    text = text.color(Color32::WHITE);
+                                }
+                                ui.label(text);
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // Move buttons - only enabled for visible columns
+                                    // Reordering works on visible columns only
+                                    if let Some(&vis_idx) = visible_idx {
+                                        let can_move_up = vis_idx > 0;
+                                        let can_move_down = vis_idx < visible_columns.len() - 1;
+
+                                        if ui
+                                            .add_enabled(
+                                                can_move_down,
+                                                egui::Button::new(egui_phosphor::regular::ARROW_DOWN)
+                                                    .small(),
+                                            )
+                                            .clicked()
+                                        {
+                                            move_down = Some(vis_idx);
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                can_move_up,
+                                                egui::Button::new(egui_phosphor::regular::ARROW_UP)
+                                                    .small(),
+                                            )
+                                            .clicked()
+                                        {
+                                            move_up = Some(vis_idx);
+                                        }
+                                    } else {
+                                        // Hidden columns - disable move buttons
+                                        ui.add_enabled(false, egui::Button::new(egui_phosphor::regular::ARROW_DOWN).small());
+                                        ui.add_enabled(false, egui::Button::new(egui_phosphor::regular::ARROW_UP).small());
+                                    }
+                                });
+                            });
+                        }
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Info text
+                ui.label(
+                    egui::RichText::new("Tip: Use checkboxes to show/hide columns. Use arrows to reorder visible columns.")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} of {} columns visible",
+                        self.column_state.get_visible_columns().len(),
+                        headers.len()
+                    ))
+                    .small()
+                    .color(Color32::GRAY),
+                );
+
+                ui.add_space(8.0);
+
+                // Close button
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(format!("{} Close", egui_phosphor::regular::X))
+                                    .min_size([80.0, 28.0].into())
+                                    .fill(Color32::from_rgb(60, 60, 70)),
+                            )
+                            .clicked()
+                        {
+                            should_close = true;
+                        }
+                    });
+                });
+            });
+
+        // Handle column moves (work on visible columns only)
+        if let Some(idx) = move_up {
+            if idx > 0 {
+                self.column_state.reorder_visible_columns(idx, idx - 1);
+            }
+        }
+        if let Some(idx) = move_down {
+            let visible_count = self.column_state.get_visible_columns().len();
+            if idx < visible_count - 1 {
+                self.column_state.reorder_visible_columns(idx, idx + 1);
+            }
+        }
+
+        if should_close {
+            self.column_state.manager_open = false;
+        }
+    }
 }
 
 impl eframe::App for FastCsvApp {
@@ -1568,6 +2296,33 @@ impl eframe::App for FastCsvApp {
                 Arc::clone(&self.update_state.update_available),
                 ctx.clone(),
             );
+        }
+
+        // Check for async filtering results
+        if let Some(receiver) = &self.filter_receiver {
+            match receiver.try_recv() {
+                Ok((indices, filters, sort_col, sort_dir, duration)) => {
+                    self.filtered_indices = Some(indices);
+                    self.applied_filters = filters;
+                    self.applied_sort_column = sort_col;
+                    self.applied_sort_direction = sort_dir;
+                    self.filter_duration = Some(duration);
+                    self.filter_receiver = None; // Done receiving
+                    self.is_filtering.store(false, Ordering::Relaxed);
+                    self.row_cache.clear(); // Clear cache for new view
+                    ctx.request_repaint(); // Trigger update to show results
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still waiting - keep spinner spinning
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Thread panicked or disconnected
+                    self.filter_receiver = None;
+                    self.is_filtering.store(false, Ordering::Relaxed);
+                    ctx.request_repaint();
+                }
+            }
         }
 
         // Handle keyboard shortcuts
@@ -1602,6 +2357,18 @@ impl eframe::App for FastCsvApp {
                 self.go_to_row.focus_input = true;
                 self.go_to_row.input.clear();
             }
+            // Cmd+Shift+C to open Column Manager
+            if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::C) {
+                self.column_state.manager_open = true;
+            }
+            // Cmd+Z for undo column actions
+            if i.modifiers.command && i.key_pressed(Key::Z) && !i.modifiers.shift {
+                self.column_state.undo();
+            }
+            // Cmd+Shift+Z for redo column actions
+            if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::Z) {
+                self.column_state.redo();
+            }
         });
 
         // Top panel with menu/toolbar
@@ -1618,7 +2385,7 @@ impl eframe::App for FastCsvApp {
                     }
                 });
                 ui.menu_button("Edit", |ui: &mut egui::Ui| {
-                    if ui.button("Find... (⌘F)").clicked() {
+                    if ui.button("Find... (⌘+F)").clicked() {
                         ui.close();
                         self.search.visible = true;
                         self.search.focus_input = true;
@@ -1639,7 +2406,7 @@ impl eframe::App for FastCsvApp {
                         self.prev_match();
                     }
                     ui.separator();
-                    if ui.button("Go to Row... (⌘L)").clicked() {
+                    if ui.button("Go to Row... (⌘+L)").clicked() {
                         ui.close();
                         self.go_to_row.open = true;
                         self.go_to_row.focus_input = true;
@@ -1647,6 +2414,11 @@ impl eframe::App for FastCsvApp {
                     }
                 });
                 ui.menu_button("View", |ui: &mut egui::Ui| {
+                    if ui.button("Column Manager... (⌘+Shift+C)").clicked() {
+                        ui.close();
+                        self.column_state.manager_open = true;
+                    }
+                    ui.separator();
                     let theme_label = if self.dark_mode {
                         "☀ Light Mode"
                     } else {
@@ -1825,6 +2597,12 @@ impl eframe::App for FastCsvApp {
 
         // Render Row Detail popup (if open)
         self.render_row_detail_popup(ctx);
+
+        // Render Column Manager dialog (if open)
+        self.render_column_manager(ctx);
+
+        // Render Filter popup (if open)
+        self.render_filter_popup(ctx);
 
         // Handle dropped files
         ctx.input(|i| {
