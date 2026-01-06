@@ -1,4 +1,4 @@
-//! QuickCSV - High-Performance CSV Viewer for macOS
+//! QuickCSV - High-Performance CSV Viewer for macOS and Web
 //!
 //! A memory-mapped, virtualized CSV viewer that can handle files from 100MB to 2GB+
 //! with zero lag. Uses memmap2 for zero-copy file loading and egui for the UI.
@@ -9,23 +9,41 @@ mod state;
 mod update;
 mod utils;
 
+#[cfg(target_arch = "wasm32")]
+use ::csv as csv_crate;
 use eframe::egui::{self, Color32, Key};
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
 // Imports from modules
+#[cfg(not(target_arch = "wasm32"))]
 use csv::init_csv_progressive;
 use state::{
     ColumnState, FilterCondition, FilterOperator, FilterState, GoToRowState, JsonViewerState,
     LoadState, RowDetailState, SearchState, SearchStatus, SharedState, SortDirection, SortState,
     MAX_NAV_ROWS,
 };
-use update::{check_for_updates, UpdateState};
+#[cfg(not(target_arch = "wasm32"))]
+use update::check_for_updates;
+use update::UpdateState;
 use utils::{format_file_size, format_json, format_number, looks_like_json, truncate_for_display};
+
+#[cfg(target_arch = "wasm32")]
+async fn yield_to_browser() {
+    // Use setTimeout(0) to yield to the macro-task queue, allowing UI rendering
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let window = web_sys::window().expect("should have a window");
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0);
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
 
 /// Height of each row in pixels
 const ROW_HEIGHT: f32 = 24.0;
@@ -138,7 +156,27 @@ impl Default for FastCsvApp {
 }
 
 impl FastCsvApp {
-    /// Open a file dialog and load the selected CSV file
+    /// Open a file dialog and load the selected CSV file (WASM)
+    #[cfg(target_arch = "wasm32")]
+    fn open_file(&mut self, ctx: &egui::Context) {
+        let task = rfd::AsyncFileDialog::new()
+            .add_filter("CSV", &["csv", "tsv", "txt"])
+            .pick_file();
+
+        let state = self.state.clone();
+        let ctx = ctx.clone();
+
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Some(file) = task.await {
+                let name = file.file_name();
+                let bytes = file.read().await;
+                Self::load_file_static(bytes.into(), name, state, ctx);
+            }
+        });
+    }
+
+    /// Open a file dialog and load the selected CSV file (Native)
+    #[cfg(not(target_arch = "wasm32"))]
     fn open_file(&mut self, ctx: &egui::Context) {
         // Cancel any ongoing indexing
         {
@@ -156,7 +194,153 @@ impl FastCsvApp {
         }
     }
 
-    /// Load a CSV file in the background
+    /// Load a file from bytes (WASM)
+    #[cfg(target_arch = "wasm32")]
+    fn load_file(&mut self, bytes: Arc<[u8]>, name: String, ctx: egui::Context) {
+        // Reset view state
+        self.scroll_y = 0.0;
+        self.scroll_x = 0.0;
+        self.column_widths.clear();
+        self.column_state.reset_columns();
+        self.search.clear();
+        self.filter_state.clear();
+        self.applied_filters.clear();
+        self.filtered_indices = None;
+        self.sort_state.column = None;
+        self.applied_sort_column = None;
+
+        Self::load_file_static(bytes, name, self.state.clone(), ctx);
+    }
+
+    /// Static helper for loading file (WASM)
+    #[cfg(target_arch = "wasm32")]
+    fn load_file_static(
+        bytes: Arc<[u8]>,
+        name: String,
+        state: Arc<RwLock<SharedState>>,
+        ctx: egui::Context,
+    ) {
+        let data_vec = bytes.to_vec();
+        let file_size = data_vec.len() as u64;
+        let delimiter = csv::parser::detect_delimiter(&data_vec);
+        let first_row_end = csv::parser::find_row_boundary(&data_vec, 0).unwrap_or(data_vec.len());
+
+        let path = PathBuf::from(name);
+
+        // Header parsing
+        let header_end = if first_row_end > 0 && first_row_end <= data_vec.len() {
+            let mut end = first_row_end;
+            if end > 0 && data_vec.get(end - 1) == Some(&b'\n') {
+                end -= 1;
+            }
+            if end > 0 && data_vec.get(end - 1) == Some(&b'\r') {
+                end -= 1;
+            }
+            end
+        } else {
+            first_row_end
+        };
+
+        let mut reader = csv_crate::ReaderBuilder::new()
+            .has_headers(false)
+            .delimiter(delimiter)
+            .from_reader(&data_vec[0..header_end]);
+
+        let headers: Vec<String> = reader
+            .records()
+            .next()
+            .and_then(|r| r.ok())
+            .map(|record| record.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_else(|| vec!["Column".to_string()]);
+
+        let mapped_csv = csv::MappedCsv {
+            data: data_vec,
+            row_offsets: Arc::new(RwLock::new(vec![0, first_row_end])),
+            headers,
+            path,
+            file_size,
+            delimiter,
+        };
+
+        {
+            let mut state_guard = state.write();
+            state_guard.csv = Some(mapped_csv);
+            state_guard.load_state = LoadState::Ready;
+            state_guard.rows_indexed.store(1, Ordering::Relaxed);
+            state_guard
+                .indexing_complete
+                .store(false, Ordering::Relaxed);
+        }
+
+        ctx.request_repaint();
+
+        // Start background indexing
+        let state_clone = state.clone();
+        let ctx_clone = ctx.clone();
+        let start_offset = first_row_end;
+
+        wasm_bindgen_futures::spawn_local(async move {
+            let (data_len, row_offsets_ref) = {
+                let state = state_clone.read();
+                if let Some(csv) = &state.csv {
+                    // Need access to data length. MappedCsv has data field on WASM.
+                    (csv.data().len(), csv.row_offsets.clone())
+                } else {
+                    return;
+                }
+            };
+
+            let mut offset = start_offset;
+            let mut batch_offsets = Vec::with_capacity(5000);
+
+            while offset < data_len {
+                {
+                    let state = state_clone.read();
+                    if state.cancel_indexing.load(Ordering::Relaxed) {
+                        return;
+                    }
+                }
+
+                if let Some(next_offset) = {
+                    let state = state_clone.read();
+                    if let Some(csv) = &state.csv {
+                        csv::parser::find_row_boundary(csv.data(), offset)
+                    } else {
+                        None
+                    }
+                } {
+                    if next_offset > offset {
+                        batch_offsets.push(next_offset);
+                    }
+                    offset = next_offset;
+                } else {
+                    break;
+                }
+
+                if batch_offsets.len() >= 5000 {
+                    let mut offsets = row_offsets_ref.write();
+                    offsets.extend(batch_offsets.drain(..));
+                    ctx_clone.request_repaint();
+                    yield_to_browser().await;
+                }
+            }
+
+            // Final
+            {
+                let mut offsets = row_offsets_ref.write();
+                offsets.extend(batch_offsets);
+            }
+
+            state_clone
+                .read()
+                .indexing_complete
+                .store(true, Ordering::SeqCst);
+            ctx_clone.request_repaint();
+        });
+    }
+
+    /// Load a CSV file in the background (Native)
+    #[cfg(not(target_arch = "wasm32"))]
     fn load_file(&mut self, path: PathBuf, ctx: egui::Context) {
         // Reset state
         self.scroll_y = 0.0;
@@ -227,7 +411,8 @@ impl FastCsvApp {
     }
 
     /// Start async filtering task
-    fn start_async_filtering(&mut self) {
+    /// Start async filtering task
+    fn start_async_filtering(&mut self, _ctx: &egui::Context) {
         // If no filters are active, clear filtered indices immediately
         if !self.filter_state.has_active_filters() {
             self.filtered_indices = None;
@@ -288,27 +473,50 @@ impl FastCsvApp {
         let is_filtering = self.is_filtering.clone();
 
         // Spawn thread
-        let start_time = std::time::Instant::now();
-        thread::spawn(move || {
-            let total_rows = {
-                let state_guard = state.read();
-                match &state_guard.csv {
-                    Some(csv) => csv.indexed_row_count(),
-                    None => {
-                        is_filtering.store(false, Ordering::Relaxed);
-                        return;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let start_time = std::time::Instant::now();
+            thread::spawn(move || {
+                let total_rows = {
+                    let state_guard = state.read();
+                    match &state_guard.csv {
+                        Some(csv) => csv.indexed_row_count(),
+                        None => {
+                            is_filtering.store(false, Ordering::Relaxed);
+                            return;
+                        }
                     }
-                }
-            };
+                };
 
-            let mut indices = Vec::new();
-            {
-                let state_guard = state.read();
-                if let Some(csv) = &state_guard.csv {
-                    if let Some(initial) = initial_indices {
-                        // OPTIMIZATION: Iterate only over previously filtered rows
-                        for &row_idx in initial.iter() {
-                            if row_idx < total_rows {
+                let mut indices = Vec::new();
+                {
+                    let state_guard = state.read();
+                    if let Some(csv) = &state_guard.csv {
+                        if let Some(initial) = initial_indices {
+                            // OPTIMIZATION: Iterate only over previously filtered rows
+                            for &row_idx in initial.iter() {
+                                if row_idx < total_rows {
+                                    if let Some(fields) = csv.parse_row(row_idx) {
+                                        if filter_state.row_matches(&fields) {
+                                            indices.push(row_idx);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if let Some(sorted) = sorted_indices {
+                            // Iterate in sorted order
+                            for &row_idx in sorted.iter() {
+                                if row_idx < total_rows {
+                                    if let Some(fields) = csv.parse_row(row_idx) {
+                                        if filter_state.row_matches(&fields) {
+                                            indices.push(row_idx);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Iterate in natural order
+                            for row_idx in 0..total_rows {
                                 if let Some(fields) = csv.parse_row(row_idx) {
                                     if filter_state.row_matches(&fields) {
                                         indices.push(row_idx);
@@ -316,35 +524,101 @@ impl FastCsvApp {
                                 }
                             }
                         }
+                    }
+                }
+
+                // Send result with metadata
+                let duration = start_time.elapsed();
+                let _ = sender.send((indices, current_filters, sort_col, sort_dir, duration));
+                is_filtering.store(false, Ordering::Relaxed);
+            });
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            // For Web: Async filtering with yields to prevent UI freeze
+            // Duration calculation on web might not be accurate with Instant
+            // but we'll return a placeholder or rough estimate.
+
+            // Note: Instant::now() panics on some WASM targets without proper support
+            // but web-sys/js-sys usually handle it or we can use performance.now()
+            // For now, let's use a zero duration as placeholder to avoid panic risk
+            let start_time_placeholder = std::time::Duration::from_secs(0);
+
+            let ctx = _ctx.clone();
+
+            wasm_bindgen_futures::spawn_local(async move {
+                let total_rows = {
+                    let state_guard = state.read();
+                    match &state_guard.csv {
+                        Some(csv) => csv.indexed_row_count(),
+                        None => {
+                            is_filtering.store(false, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                };
+
+                let mut indices = Vec::new();
+                const BATCH_SIZE: usize = 5000;
+
+                // We need to implement batching loop
+
+                {
+                    // Scope for read lock - but we can't hold lock across yield.
+                    // So we must re-acquire lock for each batch or row.
+                    // THIS IS SLOW.
+                    // Better approach: Get CSV ref? No, RwLock doesn't allow long lived ref across await.
+                    // We have to iterate and acquire lock.
+
+                    // Since we can't easily iterate an iterator with re-locking,
+                    // let's just collect indices to iterate first?
+
+                    // Optimization: if we have initial_indices, that's our list associated.
+                    let rows_to_check: Vec<usize> = if let Some(initial) = initial_indices {
+                        initial
                     } else if let Some(sorted) = sorted_indices {
-                        // Iterate in sorted order
-                        for &row_idx in sorted.iter() {
-                            if row_idx < total_rows {
-                                if let Some(fields) = csv.parse_row(row_idx) {
-                                    if filter_state.row_matches(&fields) {
-                                        indices.push(row_idx);
+                        sorted
+                    } else {
+                        (0..total_rows).collect()
+                    };
+
+                    let mut _processed = 0;
+                    for chunk in rows_to_check.chunks(BATCH_SIZE) {
+                        let mut batch_indices = Vec::new();
+                        {
+                            let state_guard = state.read();
+                            if let Some(csv) = &state_guard.csv {
+                                for &row_idx in chunk {
+                                    if row_idx < total_rows {
+                                        if let Some(fields) = csv.parse_row(row_idx) {
+                                            if filter_state.row_matches(&fields) {
+                                                batch_indices.push(row_idx);
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                    } else {
-                        // Iterate in natural order
-                        for row_idx in 0..total_rows {
-                            if let Some(fields) = csv.parse_row(row_idx) {
-                                if filter_state.row_matches(&fields) {
-                                    indices.push(row_idx);
-                                }
-                            }
-                        }
+                        indices.extend(batch_indices);
+                        _processed += chunk.len();
+
+                        // Update progress or just yield
+                        yield_to_browser().await;
                     }
                 }
-            }
 
-            // Send result with metadata
-            let duration = start_time.elapsed();
-            let _ = sender.send((indices, current_filters, sort_col, sort_dir, duration));
-            is_filtering.store(false, Ordering::Relaxed);
-        });
+                let _ = sender.send((
+                    indices,
+                    current_filters,
+                    sort_col,
+                    sort_dir,
+                    start_time_placeholder,
+                ));
+                is_filtering.store(false, Ordering::Relaxed);
+                ctx.request_repaint();
+            });
+        }
     }
 
     /// Sort data by column
@@ -407,6 +681,7 @@ impl FastCsvApp {
         let ctx = ctx.clone();
 
         // Spawn background sorting thread
+        #[cfg(not(target_arch = "wasm32"))]
         thread::spawn(move || {
             let state_guard = state.read();
             let csv = match &state_guard.csv {
@@ -488,6 +763,98 @@ impl FastCsvApp {
             is_sorting.store(false, Ordering::SeqCst);
             ctx.request_repaint();
         });
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let direction = new_direction;
+            let is_sorting_clone = Arc::clone(&is_sorting);
+
+            wasm_bindgen_futures::spawn_local(async move {
+                // Async collection phase
+                const MAX_SORT_ROWS: usize = 100_000;
+
+                let (_total_rows, rows_to_sort) = {
+                    let state_guard = state.read();
+                    if let Some(csv) = &state_guard.csv {
+                        let total = csv.indexed_row_count();
+                        (total, total.min(MAX_SORT_ROWS))
+                    } else {
+                        is_sorting_clone.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                };
+
+                let mut row_data: Vec<(usize, String)> = Vec::with_capacity(rows_to_sort);
+                const BATCH_SIZE: usize = 5000;
+
+                for start_idx in (0..rows_to_sort).step_by(BATCH_SIZE) {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        is_sorting_clone.store(false, Ordering::SeqCst);
+                        return;
+                    }
+
+                    // Process batch
+                    {
+                        let state_guard = state.read();
+                        if let Some(csv) = &state_guard.csv {
+                            let end_idx = (start_idx + BATCH_SIZE).min(rows_to_sort);
+                            for row_idx in start_idx..end_idx {
+                                if let Some(fields) = csv.parse_row(row_idx) {
+                                    let value = fields.get(col_idx).cloned().unwrap_or_default();
+                                    row_data.push((row_idx, value));
+                                }
+                            }
+                        }
+                    }
+
+                    // Update progress
+                    let pct = (start_idx * 50) / rows_to_sort;
+                    progress.store(pct, Ordering::Relaxed);
+                    ctx.request_repaint();
+
+                    // Yield
+                    yield_to_browser().await;
+                }
+
+                progress.store(50, Ordering::Relaxed);
+
+                // Sorting phase (blocking but limited to 100k rows, should be <1s)
+                yield_to_browser().await;
+
+                match direction {
+                    SortDirection::Ascending => {
+                        row_data.sort_by(|a, b| match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                            (Ok(a_num), Ok(b_num)) => a_num
+                                .partial_cmp(&b_num)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                            _ => a.1.to_lowercase().cmp(&b.1.to_lowercase()),
+                        });
+                    }
+                    SortDirection::Descending => {
+                        row_data.sort_by(|a, b| match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                            (Ok(a_num), Ok(b_num)) => b_num
+                                .partial_cmp(&a_num)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                            _ => b.1.to_lowercase().cmp(&a.1.to_lowercase()),
+                        });
+                    }
+                    SortDirection::None => {}
+                }
+
+                progress.store(90, Ordering::Relaxed);
+                ctx.request_repaint();
+                yield_to_browser().await;
+
+                {
+                    let mut indices = sorted_indices.write();
+                    *indices = row_data.into_iter().map(|(idx, _)| idx).collect();
+                }
+
+                progress.store(100, Ordering::Relaxed);
+                is_sorting_clone.store(false, Ordering::SeqCst);
+                ctx.request_repaint();
+            });
+        }
     }
 
     /// Get the actual row index considering sorting
@@ -598,6 +965,7 @@ impl FastCsvApp {
         let visible_cols = visible_columns; // Clone for thread
 
         // Spawn background search thread
+        #[cfg(not(target_arch = "wasm32"))]
         thread::spawn(move || {
             const BATCH_SIZE: usize = 10000;
 
@@ -663,11 +1031,106 @@ impl FastCsvApp {
             results.navigation_rows = nav_rows;
             results.total_match_count = total_matches;
             results.rows_searched = csv.indexed_row_count();
-            results.status = SearchStatus::Complete;
             results.nav_limit_reached = nav_limit_reached;
             drop(results);
             ctx.request_repaint();
         });
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let state = Arc::clone(&state);
+            let results = Arc::clone(&results);
+            let ctx = ctx.clone();
+            let cancel_flag = Arc::clone(&cancel_flag);
+
+            wasm_bindgen_futures::spawn_local(async move {
+                const BATCH_SIZE: usize = 10000;
+
+                let mut nav_rows: Vec<usize> = Vec::new();
+                let mut total_matches: usize = 0;
+                let mut nav_limit_reached = false;
+
+                let csv_len = {
+                    let state_guard = state.read();
+                    state_guard
+                        .csv
+                        .as_ref()
+                        .map(|c| c.indexed_row_count())
+                        .unwrap_or(0)
+                };
+
+                if csv_len == 0 {
+                    let mut results = results.write();
+                    results.status = SearchStatus::Idle;
+                    return;
+                }
+
+                // loop through chunks
+                for start_idx in (0..csv_len).step_by(BATCH_SIZE) {
+                    // Check cancellation
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        let mut results = results.write();
+                        results.status = SearchStatus::Cancelled;
+                        ctx.request_repaint();
+                        return;
+                    }
+
+                    // Process batch
+                    let end_idx = (start_idx + BATCH_SIZE).min(csv_len);
+                    {
+                        let state_guard = state.read();
+                        if let Some(csv) = &state_guard.csv {
+                            for row_idx in start_idx..end_idx {
+                                // Parse and search the row (only in visible columns)
+                                if let Some(fields) = csv.parse_row(row_idx) {
+                                    let mut row_has_match = false;
+                                    // Only search visible columns
+                                    for &col_idx in &visible_cols {
+                                        if col_idx < fields.len() {
+                                            let field = &fields[col_idx];
+                                            if field.to_lowercase().contains(&query) {
+                                                total_matches += 1;
+                                                row_has_match = true;
+                                            }
+                                        }
+                                    }
+
+                                    // Store row for navigation (limited)
+                                    if row_has_match && nav_rows.len() < MAX_NAV_ROWS {
+                                        nav_rows.push(row_idx);
+                                    } else if row_has_match && !nav_limit_reached {
+                                        nav_limit_reached = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Update UI
+                    {
+                        let mut results = results.write();
+                        results.navigation_rows = nav_rows.clone();
+                        results.total_match_count = total_matches;
+                        results.rows_searched = end_idx;
+                        results.nav_limit_reached = nav_limit_reached;
+                        drop(results);
+                        ctx.request_repaint();
+                    }
+
+                    yield_to_browser().await;
+                }
+
+                // Final update
+                let mut results = results.write();
+                results.navigation_rows = nav_rows;
+                results.total_match_count = total_matches;
+                results.rows_searched = csv_len;
+                results.status = SearchStatus::Complete;
+                results.nav_limit_reached = nav_limit_reached;
+                drop(results);
+                ctx.request_repaint();
+            });
+        }
     }
 
     /// Navigate to next matching row
@@ -903,7 +1366,7 @@ impl FastCsvApp {
 
         // Recompute filtered indices if filter changed
         if self.filter_version != self.last_filter_version {
-            self.start_async_filtering();
+            self.start_async_filtering(ui.ctx());
         }
 
         // Determine effective row count (filtered or total)
@@ -1563,6 +2026,7 @@ impl FastCsvApp {
                         )
                         .clicked()
                     {
+                        #[cfg(not(target_arch = "wasm32"))]
                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
                             let _ = clipboard.set_text(&formatted);
                         }
@@ -1580,6 +2044,7 @@ impl FastCsvApp {
                         )
                         .clicked()
                     {
+                        #[cfg(not(target_arch = "wasm32"))]
                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
                             let _ = clipboard.set_text(&raw);
                         }
@@ -1758,6 +2223,7 @@ impl FastCsvApp {
                             .button(format!("{} Copy as CSV", egui_phosphor::regular::COPY))
                             .clicked()
                         {
+                            #[cfg(not(target_arch = "wasm32"))]
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let csv_row = self
                                     .row_detail
@@ -1780,6 +2246,7 @@ impl FastCsvApp {
                             .button(format!("{} Copy as JSON", egui_phosphor::regular::CODE))
                             .clicked()
                         {
+                            #[cfg(not(target_arch = "wasm32"))]
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let mut json_obj = serde_json::Map::new();
                                 for (i, field) in self.row_detail.fields.iter().enumerate() {
@@ -1856,6 +2323,7 @@ impl FastCsvApp {
                                                     .on_hover_text("Copy value")
                                                     .clicked()
                                                 {
+                                                    #[cfg(not(target_arch = "wasm32"))]
                                                     if let Ok(mut clipboard) =
                                                         arboard::Clipboard::new()
                                                     {
@@ -2291,6 +2759,7 @@ impl eframe::App for FastCsvApp {
         // Check for updates on startup (only once)
         if !self.update_state.check_initiated {
             self.update_state.check_initiated = true;
+            #[cfg(not(target_arch = "wasm32"))]
             check_for_updates(
                 Arc::clone(&self.update_state.latest_version),
                 Arc::clone(&self.update_state.update_available),
@@ -2480,29 +2949,33 @@ impl eframe::App for FastCsvApp {
                                     .clicked()
                                 {
                                     // Open Terminal and run commands (update, upgrade, and restart app)
-                                    let script = "tell application \"Terminal\" to do script \"brew update && brew upgrade --cask quickcsv && open -a QuickCSV\"";
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        let script = "tell application \"Terminal\" to do script \"brew update && brew upgrade --cask quickcsv && open -a QuickCSV\"";
 
-                                    let success = std::process::Command::new("osascript")
-                                        .arg("-e")
-                                        .arg(script)
-                                        .spawn()
-                                        .is_ok();
-
-                                    // Fallback: copy command to clipboard if Terminal automation fails
-                                    if !success {
-                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                            let _ = clipboard.set_text("brew update && brew upgrade --cask quickcsv");
-                                        }
-                                        // Show macOS notification to inform user
-                                        let notify_script = "display notification \"Paste in Terminal to update\" with title \"QuickCSV\" subtitle \"Update command copied to clipboard\"";
-                                        let _ = std::process::Command::new("osascript")
+                                        let success = std::process::Command::new("osascript")
                                             .arg("-e")
-                                            .arg(notify_script)
-                                            .spawn();
-                                    }
+                                            .arg(script)
+                                            .spawn()
+                                            .is_ok();
 
-                                    // Close this instance so it can be overwritten and restarted
-                                    std::process::exit(0);
+                                        // Fallback: copy command to clipboard if Terminal automation fails
+                                        if !success {
+                                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                                let _ = clipboard
+                                                    .set_text("brew update && brew upgrade --cask quickcsv");
+                                            }
+                                            // Show macOS notification to inform user
+                                            let notify_script = "display notification \"Paste in Terminal to update\" with title \"QuickCSV\" subtitle \"Update command copied to clipboard\"";
+                                            let _ = std::process::Command::new("osascript")
+                                                .arg("-e")
+                                                .arg(notify_script)
+                                                .spawn();
+                                        }
+
+                                        // Close this instance so it can be overwritten and restarted
+                                        std::process::exit(0);
+                                    }
                                 }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
@@ -2607,8 +3080,15 @@ impl eframe::App for FastCsvApp {
         // Handle dropped files
         ctx.input(|i| {
             for file in &i.raw.dropped_files {
+                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(path) = &file.path {
                     self.load_file(path.clone(), ctx.clone());
+                    break;
+                }
+
+                #[cfg(target_arch = "wasm32")]
+                if let Some(bytes) = &file.bytes {
+                    self.load_file(bytes.clone(), file.name.clone(), ctx.clone());
                     break;
                 }
             }
@@ -2616,6 +3096,7 @@ impl eframe::App for FastCsvApp {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_icon() -> egui::IconData {
     let (icon_rgba, icon_width, icon_height) = {
         let icon_bytes = include_bytes!("../icons/icon-128.png");
@@ -2633,6 +3114,7 @@ fn load_icon() -> egui::IconData {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let icon = load_icon();
     let options = eframe::NativeOptions {
@@ -2660,4 +3142,45 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(FastCsvApp::default()))
         }),
     )
+}
+
+#[cfg(target_arch = "wasm32")]
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // Redirect panic to console log
+    console_error_panic_hook::set_once();
+
+    let web_options = eframe::WebOptions::default();
+
+    wasm_bindgen_futures::spawn_local(async {
+        let document = web_sys::window()
+            .expect("No window")
+            .document()
+            .expect("No document");
+
+        let canvas = document
+            .get_element_by_id("the_canvas_id")
+            .expect("Failed to find canvas element")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("Element is not a canvas");
+
+        eframe::WebRunner::new()
+            .start(
+                canvas,
+                web_options,
+                Box::new(|cc| {
+                    // Add Phosphor icons to fonts
+                    let mut fonts = egui::FontDefinitions::default();
+                    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+                    cc.egui_ctx.set_fonts(fonts);
+
+                    // Follow system theme
+                    cc.egui_ctx.set_visuals(egui::Visuals::dark());
+
+                    Ok(Box::new(FastCsvApp::default()))
+                }),
+            )
+            .await
+            .expect("failed to start eframe");
+    });
 }

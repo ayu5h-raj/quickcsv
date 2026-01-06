@@ -1,5 +1,6 @@
 //! Memory-mapped CSV file structure
 
+#[cfg(not(target_arch = "wasm32"))]
 use memmap2::Mmap;
 use parking_lot::RwLock;
 use std::path::PathBuf;
@@ -7,8 +8,12 @@ use std::sync::Arc;
 
 /// Memory-mapped CSV file with row offset index
 pub struct MappedCsv {
-    /// Memory-mapped file data
+    /// Memory-mapped file data (Native)
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) mmap: Mmap,
+    /// In-memory file data (WASM)
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) data: Vec<u8>,
     /// Byte offset of each row (including header) - shared for progressive loading
     pub row_offsets: Arc<RwLock<Vec<usize>>>,
     /// Column headers
@@ -32,6 +37,14 @@ impl MappedCsv {
         }
     }
 
+    /// Access underlying data slice
+    pub fn data(&self) -> &[u8] {
+        #[cfg(not(target_arch = "wasm32"))]
+        return &self.mmap;
+        #[cfg(target_arch = "wasm32")]
+        return &self.data;
+    }
+
     /// Get a row's data as a slice of the memory-mapped region
     pub fn get_row_bytes(&self, row_index: usize) -> Option<&[u8]> {
         let offsets = self.row_offsets.read();
@@ -46,10 +59,10 @@ impl MappedCsv {
         let end = if data_row_offset_index + 1 < offsets.len() {
             offsets[data_row_offset_index + 1]
         } else {
-            self.mmap.len()
+            self.data().len()
         };
 
-        Some(&self.mmap[start..end])
+        Some(&self.data()[start..end])
     }
 
     /// Parse a single row into fields

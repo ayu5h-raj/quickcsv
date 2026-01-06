@@ -3,15 +3,25 @@
 //! Contains functions for detecting delimiters, finding row boundaries,
 //! and progressive loading of CSV files.
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::MappedCsv;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::state::{LoadState, SharedState};
+#[cfg(not(target_arch = "wasm32"))]
 use eframe::egui;
+#[cfg(not(target_arch = "wasm32"))]
 use memmap2::Mmap;
+#[cfg(not(target_arch = "wasm32"))]
 use parking_lot::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 /// Find the next row boundary in CSV data, respecting quoted fields.
@@ -137,6 +147,7 @@ pub fn detect_delimiter(bytes: &[u8]) -> u8 {
 }
 
 /// Initialize CSV file for progressive loading - parses headers and starts indexing
+#[cfg(not(target_arch = "wasm32"))]
 pub fn init_csv_progressive(
     path: &PathBuf,
     state: &Arc<RwLock<SharedState>>,

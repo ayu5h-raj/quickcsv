@@ -157,6 +157,13 @@ impl FilterState {
         }
     }
 
+    /// Clear all filters
+    pub fn clear(&mut self) {
+        self.filters.clear();
+        self.active_popup = None;
+        self.filter_input.clear();
+    }
+
     /// Close filter popup
     pub fn close_popup(&mut self) {
         self.active_popup = None;
