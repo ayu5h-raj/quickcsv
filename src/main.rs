@@ -20,8 +20,9 @@ use std::thread;
 // Imports from modules
 use csv::init_csv_progressive;
 use state::{
-    ColumnState, FilterOperator, FilterState, GoToRowState, JsonViewerState, LoadState,
-    RowDetailState, SearchState, SearchStatus, SharedState, SortDirection, SortState, MAX_NAV_ROWS,
+    ColumnState, FilterCondition, FilterOperator, FilterState, GoToRowState, JsonViewerState,
+    LoadState, RowDetailState, SearchState, SearchStatus, SharedState, SortDirection, SortState,
+    MAX_NAV_ROWS,
 };
 use update::{check_for_updates, UpdateState};
 use utils::{format_file_size, format_json, format_number, looks_like_json, truncate_for_display};
@@ -81,9 +82,22 @@ struct FastCsvApp {
     /// Track previous sorting state to detect completion
     was_sorting: bool,
     /// Channel to receive filtered indices from background thread
-    filter_receiver: Option<mpsc::Receiver<Vec<usize>>>,
+    filter_receiver: Option<
+        mpsc::Receiver<(
+            Vec<usize>,
+            std::collections::HashMap<usize, FilterCondition>,
+            Option<usize>,
+            SortDirection,
+        )>,
+    >,
     /// Whether filtering is currently in progress
     is_filtering: Arc<AtomicBool>,
+    /// Optimization: Filters that were applied to generate current result
+    applied_filters: std::collections::HashMap<usize, FilterCondition>,
+    /// Optimization: Sort column used to generate current result
+    applied_sort_column: Option<usize>,
+    /// Optimization: Sort direction used to generate current result
+    applied_sort_direction: SortDirection,
 }
 
 impl Default for FastCsvApp {
@@ -111,6 +125,9 @@ impl Default for FastCsvApp {
             was_sorting: false,
             filter_receiver: None,
             is_filtering: Arc::new(AtomicBool::new(false)),
+            applied_filters: std::collections::HashMap::new(),
+            applied_sort_column: None,
+            applied_sort_direction: SortDirection::None,
         }
     }
 }
@@ -197,6 +214,7 @@ impl FastCsvApp {
         if !self.filter_state.has_active_filters() {
             self.filtered_indices = None;
             self.last_filter_version = self.filter_version;
+            self.applied_filters.clear(); // Clear applied state
             return;
         }
 
@@ -213,6 +231,27 @@ impl FastCsvApp {
         // Clone state for thread
         let state = self.state.clone();
         let filter_state = self.filter_state.clone();
+
+        // Snapshot current state for optimization check and return
+        let current_filters = self.filter_state.filters.clone();
+        let sort_col = self.sort_state.column;
+        let sort_dir = self.sort_state.direction;
+
+        // Check for optimization:
+        let can_optimize = self.filtered_indices.is_some()
+            && self.applied_sort_column == sort_col
+            && self.applied_sort_direction == sort_dir
+            && current_filters.len() > self.applied_filters.len()
+            && self
+                .applied_filters
+                .iter()
+                .all(|(k, v)| current_filters.get(k) == Some(v));
+
+        let initial_indices = if can_optimize {
+            self.filtered_indices.clone()
+        } else {
+            None
+        };
 
         // Capture sort state for consistent ordering
         let sorted_indices = {
@@ -247,7 +286,18 @@ impl FastCsvApp {
             {
                 let state_guard = state.read();
                 if let Some(csv) = &state_guard.csv {
-                    if let Some(sorted) = sorted_indices {
+                    if let Some(initial) = initial_indices {
+                        // OPTIMIZATION: Iterate only over previously filtered rows
+                        for &row_idx in initial.iter() {
+                            if row_idx < total_rows {
+                                if let Some(fields) = csv.parse_row(row_idx) {
+                                    if filter_state.row_matches(&fields) {
+                                        indices.push(row_idx);
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(sorted) = sorted_indices {
                         // Iterate in sorted order
                         for &row_idx in sorted.iter() {
                             if row_idx < total_rows {
@@ -271,8 +321,8 @@ impl FastCsvApp {
                 }
             }
 
-            // Send result
-            let _ = sender.send(indices);
+            // Send result with metadata
+            let _ = sender.send((indices, current_filters, sort_col, sort_dir));
             is_filtering.store(false, Ordering::Relaxed);
         });
     }
@@ -2227,8 +2277,11 @@ impl eframe::App for FastCsvApp {
         // Check for async filtering results
         if let Some(receiver) = &self.filter_receiver {
             match receiver.try_recv() {
-                Ok(indices) => {
+                Ok((indices, filters, sort_col, sort_dir)) => {
                     self.filtered_indices = Some(indices);
+                    self.applied_filters = filters;
+                    self.applied_sort_column = sort_col;
+                    self.applied_sort_direction = sort_dir;
                     self.filter_receiver = None; // Done receiving
                     self.is_filtering.store(false, Ordering::Relaxed);
                     self.row_cache.clear(); // Clear cache for new view

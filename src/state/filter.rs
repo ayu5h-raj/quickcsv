@@ -52,7 +52,7 @@ impl Default for FilterOperator {
 }
 
 /// A filter condition for a column
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FilterCondition {
     pub operator: FilterOperator,
     pub value: String,

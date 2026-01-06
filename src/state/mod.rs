@@ -11,7 +11,7 @@ mod sort;
 
 pub use columns::ColumnState;
 pub use dialogs::{GoToRowState, JsonViewerState, RowDetailState};
-pub use filter::{FilterOperator, FilterState};
+pub use filter::{FilterCondition, FilterOperator, FilterState};
 pub use search::{SearchState, SearchStatus, MAX_NAV_ROWS};
 pub use shared::{LoadState, SharedState};
 pub use sort::{SortDirection, SortState};
