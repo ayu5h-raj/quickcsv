@@ -180,15 +180,15 @@ impl FastCsvApp {
         let state = self.state.clone();
         let ctx = ctx.clone();
 
-        // Show loading state immediately
-        {
-            let mut state_guard = state.write();
-            state_guard.load_state = LoadState::Indexing;
-        }
-        ctx.request_repaint();
-
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(file) = task.await {
+                // Show loading state only after user selects a file
+                {
+                    let mut state_guard = state.write();
+                    state_guard.load_state = LoadState::Indexing;
+                }
+                ctx.request_repaint();
+
                 let name = file.file_name();
                 let bytes = file.read().await;
 
