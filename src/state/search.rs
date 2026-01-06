@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 /// Search execution state
 #[derive(Clone, Copy, PartialEq, Default)]
+#[allow(dead_code)]
 pub enum SearchStatus {
     #[default]
     Idle,
@@ -58,6 +59,7 @@ pub struct SearchState {
     pub visible: bool,
     /// Whether to focus the input field (set when opening search)
     pub focus_input: bool,
+    /// Current search query (in the text field) (set when opening search)
     /// Current search query (in the text field)
     pub query: String,
     /// The active/confirmed search query (lowercase, for matching)
@@ -76,6 +78,23 @@ pub struct SearchState {
     pub history_index: Option<usize>,
     /// Temporary storage for current query when browsing history
     pub history_temp_query: String,
+}
+
+impl SearchState {
+    /// Clear search state (but keep history)
+    #[allow(dead_code)]
+    pub fn clear(&mut self) {
+        self.visible = false;
+        self.query.clear();
+        self.active_query.clear();
+        self.current_index = 0;
+        self.scroll_to_row = None;
+        self.results.write().status = SearchStatus::Idle;
+        self.results.write().total_match_count = 0;
+        self.results.write().navigation_rows.clear();
+        self.cancel_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl Default for SearchState {

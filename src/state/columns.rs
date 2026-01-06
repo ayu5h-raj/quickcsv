@@ -174,6 +174,13 @@ impl ColumnState {
         self.clear_redo();
     }
 
+    /// Reset column order and visibility
+    #[allow(dead_code)]
+    pub fn reset_columns(&mut self) {
+        self.show_all_columns();
+        self.reset_column_order();
+    }
+
     /// Reset column order to original
     pub fn reset_column_order(&mut self) {
         if self

@@ -685,6 +685,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1303,8 +1313,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "335ff9f135e4384c8150d6f27c6daed433577f86b4750418338c01a1a2528592"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2578,21 +2590,27 @@ dependencies = [
 
 [[package]]
 name = "quickcsv"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "arboard",
+ "console_error_panic_hook",
  "csv",
  "eframe",
  "egui-phosphor",
  "egui_extras",
+ "getrandom 0.2.16",
  "humansize",
  "image",
+ "js-sys",
  "memchr",
  "memmap2",
  "parking_lot",
  "rfd",
  "serde_json",
  "ureq",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

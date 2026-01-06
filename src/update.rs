@@ -4,11 +4,15 @@
 
 use eframe::egui;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 /// Current version from Cargo.toml
+#[allow(dead_code)]
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Update checker state
@@ -35,6 +39,8 @@ impl Default for UpdateState {
 }
 
 /// Check for updates from GitHub releases (runs in background thread)
+/// Check for updates from GitHub releases (runs in background thread)
+#[cfg(not(target_arch = "wasm32"))]
 pub fn check_for_updates(
     latest_version: Arc<RwLock<Option<String>>>,
     update_available: Arc<AtomicBool>,
@@ -70,7 +76,18 @@ pub fn check_for_updates(
     });
 }
 
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
+pub fn check_for_updates(
+    _latest_version: Arc<RwLock<Option<String>>>,
+    _update_available: Arc<AtomicBool>,
+    _ctx: egui::Context,
+) {
+    // No-op for WASM
+}
+
 /// Compare version strings (simple semver comparison)
+#[allow(dead_code)]
 pub fn is_newer_version(latest: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
 
