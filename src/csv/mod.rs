@@ -8,3 +8,5 @@ pub mod parser;
 pub use mapped::MappedCsv;
 #[cfg(not(target_arch = "wasm32"))]
 pub use parser::init_csv_progressive;
+#[cfg(target_arch = "wasm32")]
+pub use parser::init_csv_web;

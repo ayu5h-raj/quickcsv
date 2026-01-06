@@ -152,3 +152,33 @@ jobs:
           git add Casks/quickcsv.rb
           git commit -m "Update QuickCSV to ${VERSION}"
           git push
+
+  build-deploy-web:
+    needs: update-homebrew
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          
+      - name: Install Trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: 'latest'
+          
+      - name: Build WASM
+        run: trunk build --release --public-url /quickcsv/
+        
+      - name: Add .nojekyll
+        run: touch dist/.nojekyll
+        
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist

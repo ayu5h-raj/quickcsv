@@ -120,10 +120,19 @@ struct FastCsvApp {
     applied_sort_direction: SortDirection,
     /// Duration of last filter operation (for display)
     filter_duration: Option<std::time::Duration>,
+    /// Channel for receiving loaded file data from async web tasks (WASM)
+    #[cfg(target_arch = "wasm32")]
+    file_loader_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
+    /// Channel receiver for file data (WASM)
+    #[cfg(target_arch = "wasm32")]
+    file_loader_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
 }
 
 impl Default for FastCsvApp {
     fn default() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let (tx, rx) = std::sync::mpsc::channel();
+
         Self {
             state: Arc::new(RwLock::new(SharedState::default())),
             scroll_y: 0.0,
@@ -151,28 +160,98 @@ impl Default for FastCsvApp {
             applied_sort_column: None,
             applied_sort_direction: SortDirection::None,
             filter_duration: None,
+            #[cfg(target_arch = "wasm32")]
+            file_loader_tx: tx,
+            #[cfg(target_arch = "wasm32")]
+            file_loader_rx: rx,
         }
     }
 }
 
 impl FastCsvApp {
-    /// Open a file dialog and load the selected CSV file (WASM)
+    /// Open a file dialog and queue the file for loading (WASM)
     #[cfg(target_arch = "wasm32")]
     fn open_file(&mut self, ctx: &egui::Context) {
         let task = rfd::AsyncFileDialog::new()
             .add_filter("CSV", &["csv", "tsv", "txt"])
             .pick_file();
 
+        let tx = self.file_loader_tx.clone();
         let state = self.state.clone();
         let ctx = ctx.clone();
+
+        // Show loading state immediately
+        {
+            let mut state_guard = state.write();
+            state_guard.load_state = LoadState::Indexing;
+        }
+        ctx.request_repaint();
 
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(file) = task.await {
                 let name = file.file_name();
                 let bytes = file.read().await;
-                Self::load_file_static(bytes.into(), name, state, ctx);
+
+                // Send to main thread for processing via channel
+                if tx.send((name, bytes)).is_err() {
+                    web_sys::console::error_1(&"Failed to send file data".into());
+                }
+
+                ctx.request_repaint();
             }
         });
+    }
+
+    /// Process a loaded file (WASM) - called from update() when channel receives data
+    #[cfg(target_arch = "wasm32")]
+    fn load_file_web(&mut self, name: String, bytes: Vec<u8>, ctx: egui::Context) {
+        // Reset state
+        self.scroll_y = 0.0;
+        self.scroll_x = 0.0;
+        self.column_widths.clear();
+        self.row_cache.clear();
+        self.last_visible_range = (0, 0);
+        self.sort_state = SortState::default();
+        self.column_state = ColumnState::default();
+        self.filter_state = FilterState::default();
+        self.filtered_indices = None;
+        self.applied_filters.clear();
+        self.applied_sort_column = None;
+        self.search.cancel_flag.store(true, Ordering::SeqCst);
+        self.search.current_index = 0;
+        self.search.active_query.clear();
+        {
+            let mut results = self.search.results.write();
+            results.navigation_rows.clear();
+            results.total_match_count = 0;
+            results.status = SearchStatus::Idle;
+            results.rows_searched = 0;
+            results.nav_limit_reached = false;
+        }
+
+        // Set loading state
+        {
+            let mut state_guard = self.state.write();
+            state_guard.csv = None;
+            state_guard.load_state = LoadState::Indexing;
+            state_guard.error_message = None;
+            state_guard.rows_indexed.store(0, Ordering::Relaxed);
+            state_guard.cancel_indexing.store(false, Ordering::Relaxed);
+            state_guard
+                .indexing_complete
+                .store(false, Ordering::Relaxed);
+        }
+
+        // Use init_csv_web for synchronous parsing
+        let state = Arc::clone(&self.state);
+        let result = csv::init_csv_web(name, bytes, &state, &ctx);
+
+        if let Err(e) = result {
+            let mut state_guard = state.write();
+            state_guard.load_state = LoadState::Error;
+            state_guard.error_message = Some(e);
+            ctx.request_repaint();
+        }
     }
 
     /// Open a file dialog and load the selected CSV file (Native)
@@ -262,8 +341,26 @@ impl FastCsvApp {
             delimiter,
         };
 
+        let mut state_guard = state.write();
+
+        // Cancel any ongoing indexing first
+        state_guard.cancel_indexing.store(true, Ordering::SeqCst);
+
+        // Clear old CSV data completely
+        state_guard.csv = None;
+        state_guard.rows_indexed.store(0, Ordering::Relaxed);
+        state_guard
+            .indexing_complete
+            .store(false, Ordering::Relaxed);
+        state_guard.error_message = None;
+        state_guard.load_state = LoadState::Indexing;
+
+        drop(state_guard);
+
+        // Now set up the new CSV
         {
             let mut state_guard = state.write();
+            state_guard.cancel_indexing.store(false, Ordering::Relaxed);
             state_guard.csv = Some(mapped_csv);
             state_guard.load_state = LoadState::Ready;
             state_guard.rows_indexed.store(1, Ordering::Relaxed);
@@ -537,13 +634,11 @@ impl FastCsvApp {
         #[cfg(target_arch = "wasm32")]
         {
             // For Web: Async filtering with yields to prevent UI freeze
-            // Duration calculation on web might not be accurate with Instant
-            // but we'll return a placeholder or rough estimate.
-
-            // Note: Instant::now() panics on some WASM targets without proper support
-            // but web-sys/js-sys usually handle it or we can use performance.now()
-            // For now, let's use a zero duration as placeholder to avoid panic risk
-            let start_time_placeholder = std::time::Duration::from_secs(0);
+            // Use web_sys performance.now() for timing
+            let start_time_ms = web_sys::window()
+                .and_then(|w| w.performance())
+                .map(|p| p.now())
+                .unwrap_or(0.0);
 
             let ctx = _ctx.clone();
 
@@ -608,13 +703,14 @@ impl FastCsvApp {
                     }
                 }
 
-                let _ = sender.send((
-                    indices,
-                    current_filters,
-                    sort_col,
-                    sort_dir,
-                    start_time_placeholder,
-                ));
+                // Calculate elapsed time using performance.now()
+                let elapsed_ms = web_sys::window()
+                    .and_then(|w| w.performance())
+                    .map(|p| p.now() - start_time_ms)
+                    .unwrap_or(0.0);
+                let duration = std::time::Duration::from_secs_f64(elapsed_ms / 1000.0);
+
+                let _ = sender.send((indices, current_filters, sort_col, sort_dir, duration));
                 is_filtering.store(false, Ordering::Relaxed);
                 ctx.request_repaint();
             });
@@ -2756,6 +2852,14 @@ impl FastCsvApp {
 
 impl eframe::App for FastCsvApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll file loader channel (WASM only)
+        #[cfg(target_arch = "wasm32")]
+        {
+            while let Ok((name, bytes)) = self.file_loader_rx.try_recv() {
+                self.load_file_web(name, bytes, ctx.clone());
+            }
+        }
+
         // Check for updates on startup (only once)
         if !self.update_state.check_initiated {
             self.update_state.check_initiated = true;
@@ -3088,7 +3192,7 @@ impl eframe::App for FastCsvApp {
 
                 #[cfg(target_arch = "wasm32")]
                 if let Some(bytes) = &file.bytes {
-                    self.load_file(bytes.clone(), file.name.clone(), ctx.clone());
+                    self.load_file_web(file.name.clone(), bytes.to_vec(), ctx.clone());
                     break;
                 }
             }
@@ -3145,7 +3249,6 @@ fn main() -> eframe::Result<()> {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[cfg(target_arch = "wasm32")]
 fn main() {
     // Redirect panic to console log
     console_error_panic_hook::set_once();
@@ -3157,6 +3260,13 @@ fn main() {
             .expect("No window")
             .document()
             .expect("No document");
+
+        // Hide the loading spinner
+        if let Some(loading_element) = document.get_element_by_id("center_text") {
+            loading_element
+                .set_attribute("style", "display: none;")
+                .ok();
+        }
 
         let canvas = document
             .get_element_by_id("the_canvas_id")

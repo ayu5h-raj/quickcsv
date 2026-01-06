@@ -9,7 +9,7 @@ repository = "https://github.com/ayu5h-raj/quickcsv"
 default-run = "quickcsv"
 
 [lib]
-name = "quickcsv"
+name = "quickcsv_lib"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
