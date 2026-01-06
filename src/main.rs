@@ -952,11 +952,17 @@ impl FastCsvApp {
 
     /// Get the actual row index considering sorting
     fn get_actual_row_index(&self, display_index: usize) -> usize {
-        if self.sort_state.direction == SortDirection::None {
+        // Note: ensure_tabs requires &mut, but this method only needs &self
+        // We'll assume tabs are already ensured by the caller
+        if self.tabs.is_empty() {
+            return display_index;
+        }
+        let tab = &self.tabs[self.active_tab_index];
+        if tab.sort_state.direction == SortDirection::None {
             return display_index;
         }
 
-        let indices = self.sort_state.sorted_indices.read();
+        let indices = tab.sort_state.sorted_indices.read();
         if indices.is_empty() {
             display_index
         } else if display_index < indices.len() {
@@ -975,12 +981,14 @@ impl FastCsvApp {
     /// - Highlighting is done on-the-fly during rendering
     /// - Only searches visible columns (respects column visibility settings)
     fn execute_search(&mut self, ctx: &egui::Context) {
-        let query = self.search.query.trim().to_lowercase();
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+        let query = tab.search.query.trim().to_lowercase();
 
         // Don't search if query is empty
         if query.is_empty() {
-            self.search.cancel_flag.store(true, Ordering::SeqCst);
-            let mut results = self.search.results.write();
+            tab.search.cancel_flag.store(true, Ordering::SeqCst);
+            let mut results = tab.search.results.write();
             results.navigation_rows.clear();
             results.total_match_count = 0;
             results.status = SearchStatus::Idle;
@@ -988,48 +996,48 @@ impl FastCsvApp {
         }
 
         // Add to search history (if not duplicate of last entry)
-        let query_for_history = self.search.query.trim().to_string();
+        let query_for_history = tab.search.query.trim().to_string();
         if !query_for_history.is_empty() {
             // Remove if already exists (to move to end)
-            self.search.history.retain(|h| h != &query_for_history);
-            self.search.history.push(query_for_history);
+            tab.search.history.retain(|h| h != &query_for_history);
+            tab.search.history.push(query_for_history);
             // Keep history limited to last 50 entries
-            if self.search.history.len() > 50 {
-                self.search.history.remove(0);
+            if tab.search.history.len() > 50 {
+                tab.search.history.remove(0);
             }
         }
         // Reset history navigation
-        self.search.history_index = None;
+        tab.search.history_index = None;
 
         // Cancel any previous search
-        self.search.cancel_flag.store(true, Ordering::SeqCst);
+        tab.search.cancel_flag.store(true, Ordering::SeqCst);
 
         // Create new cancel flag for this search
-        self.search.cancel_flag = Arc::new(AtomicBool::new(false));
-        let cancel_flag = Arc::clone(&self.search.cancel_flag);
+        tab.search.cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag = Arc::clone(&tab.search.cancel_flag);
 
         // Reset search state
-        self.search.current_index = 0;
-        self.search.active_query = query.clone();
+        tab.search.current_index = 0;
+        tab.search.active_query = query.clone();
 
         // Get total rows and visible columns for progress
         let (total_rows, visible_columns) = {
             let num_columns = {
-                let state = self.state.read();
+                let state = tab.state.read();
                 state.csv.as_ref().map(|c| c.headers.len()).unwrap_or(0)
             };
 
             // Initialize column order if needed
             if num_columns > 0 {
-                self.column_state.init_column_order(num_columns);
+                tab.column_state.init_column_order(num_columns);
             }
 
             // Get visible columns (original indices)
-            let visible = self.column_state.get_visible_columns();
+            let visible = tab.column_state.get_visible_columns();
 
             // Get total rows
             let total = {
-                let state = self.state.read();
+                let state = tab.state.read();
                 state
                     .csv
                     .as_ref()
@@ -1042,7 +1050,7 @@ impl FastCsvApp {
 
         // Initialize results
         {
-            let mut results = self.search.results.write();
+            let mut results = tab.search.results.write();
             results.navigation_rows.clear();
             results.total_match_count = 0;
             results.status = SearchStatus::Searching;
@@ -1052,8 +1060,8 @@ impl FastCsvApp {
         }
 
         // Clone what we need for the background thread
-        let state = Arc::clone(&self.state);
-        let results = Arc::clone(&self.search.results);
+        let state = Arc::clone(&tab.state);
+        let results = Arc::clone(&tab.search.results);
         let ctx = ctx.clone();
         let visible_cols = visible_columns; // Clone for thread
 
@@ -1228,35 +1236,42 @@ impl FastCsvApp {
 
     /// Navigate to next matching row
     fn next_match(&mut self) {
-        let results = self.search.results.read();
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+        let results = tab.search.results.read();
         if results.navigation_rows.is_empty() {
             return;
         }
-        self.search.current_index = (self.search.current_index + 1) % results.navigation_rows.len();
-        let row = results.navigation_rows[self.search.current_index];
-        self.search.scroll_to_row = Some(row);
+        tab.search.current_index = (tab.search.current_index + 1) % results.navigation_rows.len();
+        let row = results.navigation_rows[tab.search.current_index];
+        tab.search.scroll_to_row = Some(row);
     }
 
     /// Navigate to previous matching row
     fn prev_match(&mut self) {
-        let results = self.search.results.read();
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+        let results = tab.search.results.read();
         if results.navigation_rows.is_empty() {
             return;
         }
-        if self.search.current_index == 0 {
-            self.search.current_index = results.navigation_rows.len() - 1;
+        if tab.search.current_index == 0 {
+            tab.search.current_index = results.navigation_rows.len() - 1;
         } else {
-            self.search.current_index -= 1;
+            tab.search.current_index -= 1;
         }
-        let row = results.navigation_rows[self.search.current_index];
-        self.search.scroll_to_row = Some(row);
+        let row = results.navigation_rows[tab.search.current_index];
+        tab.search.scroll_to_row = Some(row);
     }
 
     /// Render the search bar
     fn render_search_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
         // Read search results state
         let (status, total_matches, nav_row_count, rows_searched, total_rows, nav_limit_reached) = {
-            let results = self.search.results.read();
+            let results = tab.search.results.read();
             (
                 results.status,
                 results.total_match_count,
@@ -1272,51 +1287,51 @@ impl FastCsvApp {
 
             // Search input field
             let response = ui.add(
-                egui::TextEdit::singleline(&mut self.search.query)
+                egui::TextEdit::singleline(&mut tab.search.query)
                     .hint_text("Search visible columns...")
                     .desired_width(250.0),
             );
 
             // Auto-focus when search bar opens
-            if self.search.focus_input {
+            if tab.search.focus_input {
                 response.request_focus();
-                self.search.focus_input = false;
+                tab.search.focus_input = false;
             }
 
             // Handle up/down arrow for history navigation (only when focused)
-            if response.has_focus() && !self.search.history.is_empty() {
+            if response.has_focus() && !tab.search.history.is_empty() {
                 let up_pressed = ui.input(|i| i.key_pressed(Key::ArrowUp));
                 let down_pressed = ui.input(|i| i.key_pressed(Key::ArrowDown));
 
                 if up_pressed {
-                    match self.search.history_index {
+                    match tab.search.history_index {
                         None => {
                             // Save current query and start browsing from most recent
-                            self.search.history_temp_query = self.search.query.clone();
-                            self.search.history_index = Some(self.search.history.len() - 1);
-                            self.search.query =
-                                self.search.history.last().cloned().unwrap_or_default();
+                            tab.search.history_temp_query = tab.search.query.clone();
+                            tab.search.history_index = Some(tab.search.history.len() - 1);
+                            tab.search.query =
+                                tab.search.history.last().cloned().unwrap_or_default();
                         }
                         Some(idx) if idx > 0 => {
                             // Go to older entry
-                            self.search.history_index = Some(idx - 1);
-                            self.search.query = self.search.history[idx - 1].clone();
+                            tab.search.history_index = Some(idx - 1);
+                            tab.search.query = tab.search.history[idx - 1].clone();
                         }
                         _ => {} // Already at oldest entry
                     }
                 }
 
                 if down_pressed {
-                    match self.search.history_index {
-                        Some(idx) if idx < self.search.history.len() - 1 => {
+                    match tab.search.history_index {
+                        Some(idx) if idx < tab.search.history.len() - 1 => {
                             // Go to newer entry
-                            self.search.history_index = Some(idx + 1);
-                            self.search.query = self.search.history[idx + 1].clone();
+                            tab.search.history_index = Some(idx + 1);
+                            tab.search.query = tab.search.history[idx + 1].clone();
                         }
                         Some(_) => {
                             // Back to the original query
-                            self.search.history_index = None;
-                            self.search.query = self.search.history_temp_query.clone();
+                            tab.search.history_index = None;
+                            tab.search.query = tab.search.history_temp_query.clone();
                         }
                         None => {} // Not browsing history
                     }
@@ -1325,26 +1340,26 @@ impl FastCsvApp {
 
             // Execute search on Enter (keep focus on input)
             let enter_pressed = ui.input(|i| i.key_pressed(Key::Enter));
-            if enter_pressed && (response.has_focus() || response.lost_focus()) {
-                self.execute_search(ctx);
-                // Request focus back so user can edit query
-                response.request_focus();
-            }
+            let should_search_enter =
+                enter_pressed && (response.has_focus() || response.lost_focus());
 
             // Search button (disabled during search)
             let is_searching = status == SearchStatus::Searching;
-            if ui
+            let should_search_button = ui
                 .add_enabled(!is_searching, egui::Button::new("Search"))
-                .clicked()
-            {
-                self.execute_search(ctx);
-                // Also keep focus on input after button click
-                response.request_focus();
-            }
+                .clicked();
 
             // Cancel button during search
-            if is_searching && ui.button("Cancel").clicked() {
-                self.search.cancel_flag.store(true, Ordering::SeqCst);
+            let should_cancel = is_searching && ui.button("Cancel").clicked();
+
+            // Drop tab borrow before calling execute_search
+            if should_search_enter || should_search_button {
+                drop(tab);
+                self.execute_search(ctx);
+                // Request focus back so user can edit query
+                response.request_focus();
+            } else if should_cancel {
+                tab.search.cancel_flag.store(true, Ordering::SeqCst);
             }
 
             ui.separator();
@@ -1383,15 +1398,15 @@ impl FastCsvApp {
                 SearchStatus::Complete | SearchStatus::Cancelled => {
                     if total_matches > 0 {
                         // Ensure current_index is valid
-                        if self.search.current_index >= nav_row_count && nav_row_count > 0 {
-                            self.search.current_index = 0;
+                        if tab.search.current_index >= nav_row_count && nav_row_count > 0 {
+                            tab.search.current_index = 0;
                         }
                         // Show total matches and navigation position
                         ui.label(format!("{} matches", format_number(total_matches)));
                         if has_nav_rows {
                             ui.label(format!(
                                 "(row {} of {}{})",
-                                self.search.current_index + 1,
+                                tab.search.current_index + 1,
                                 format_number(nav_row_count),
                                 if nav_limit_reached { "+" } else { "" }
                             ));
@@ -1399,7 +1414,7 @@ impl FastCsvApp {
                         if status == SearchStatus::Cancelled {
                             ui.label("(partial)");
                         }
-                    } else if !self.search.active_query.is_empty() {
+                    } else if !tab.search.active_query.is_empty() {
                         ui.label("No matches");
                     }
                 }
@@ -1408,18 +1423,23 @@ impl FastCsvApp {
                 }
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(egui_phosphor::regular::X).clicked() {
-                    self.search.cancel_flag.store(true, Ordering::SeqCst);
-                    self.search.visible = false;
-                    self.search.query.clear();
-                    self.search.active_query.clear();
-                    let mut results = self.search.results.write();
-                    results.navigation_rows.clear();
-                    results.total_match_count = 0;
-                    results.status = SearchStatus::Idle;
-                }
-            });
+            let should_close_search = {
+                let mut clicked = false;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    clicked = ui.button(egui_phosphor::regular::X).clicked();
+                });
+                clicked
+            };
+            if should_close_search {
+                tab.search.cancel_flag.store(true, Ordering::SeqCst);
+                tab.search.visible = false;
+                tab.search.query.clear();
+                tab.search.active_query.clear();
+                let mut results = tab.search.results.write();
+                results.navigation_rows.clear();
+                results.total_match_count = 0;
+                results.status = SearchStatus::Idle;
+            }
         });
 
         // Request repaint during search to update progress
@@ -1431,8 +1451,10 @@ impl FastCsvApp {
     /// Render the virtualized table using egui_extras::TableBuilder
     fn render_table(&mut self, ui: &mut egui::Ui) {
         self.ensure_tabs();
-        let tab = self.active_tab_mut();
-        self.render_table_with_tab(ui, tab);
+        // Get tab index first to avoid borrow conflicts
+        let tab_idx = self.active_tab_index;
+        // Call render_table_with_tab with direct mutable reference
+        self.render_table_with_tab(ui, &mut self.tabs[tab_idx]);
     }
 
     fn render_table_with_tab(&mut self, ui: &mut egui::Ui, tab: &mut TabState) {
@@ -1681,7 +1703,7 @@ impl FastCsvApp {
                                     if header_response.clicked()
                                         && !is_sorting
                                         && !is_dragging
-                                        && self.column_state.dragged_column.is_none()
+                                        && tab.column_state.dragged_column.is_none()
                                     {
                                         clicked_column = Some(original_idx);
                                     }
@@ -1951,8 +1973,13 @@ impl FastCsvApp {
 
     /// Render the status bar
     fn render_status_bar(&self, ui: &mut egui::Ui) {
-        self.ensure_tabs();
-        let tab = self.active_tab();
+        // Note: ensure_tabs requires &mut, but this method only needs &self
+        // We'll assume tabs are already ensured by the caller
+        if self.tabs.is_empty() {
+            ui.label("No file loaded");
+            return;
+        }
+        let tab = &self.tabs[self.active_tab_index];
         let state = tab.state.read();
 
         ui.horizontal(|ui| match state.load_state {
@@ -2013,22 +2040,25 @@ impl FastCsvApp {
 
     /// Render the JSON viewer popup
     fn render_json_popup(&mut self, ctx: &egui::Context) {
-        if !self.json_viewer.open {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
+        if !tab.json_viewer.open {
             return;
         }
 
         // Handle Escape to close
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.json_viewer.open = false;
+            tab.json_viewer.open = false;
             return;
         }
 
         // Copy values to avoid borrow issues
-        let column_name = self.json_viewer.column_name.clone();
-        let row_num = format_number(self.json_viewer.row + 1);
-        let is_valid = self.json_viewer.is_valid_json;
-        let formatted = self.json_viewer.formatted_content.clone();
-        let raw = self.json_viewer.raw_content.clone();
+        let column_name = tab.json_viewer.column_name.clone();
+        let row_num = format_number(tab.json_viewer.row + 1);
+        let is_valid = tab.json_viewer.is_valid_json;
+        let mut formatted = tab.json_viewer.formatted_content.clone();
+        let raw = tab.json_viewer.raw_content.clone();
 
         let mut should_close = false;
 
@@ -2170,19 +2200,22 @@ impl FastCsvApp {
             });
 
         if should_close {
-            self.json_viewer.open = false;
+            tab.json_viewer.open = false;
         }
     }
 
     /// Render the Go to Row dialog
     fn render_go_to_row_dialog(&mut self, ctx: &egui::Context) {
-        if !self.go_to_row.open {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
+        if !tab.go_to_row.open {
             return;
         }
 
         // Get total rows for validation
         let total_rows = {
-            let state = self.state.read();
+            let state = tab.state.read();
             state
                 .csv
                 .as_ref()
@@ -2191,7 +2224,7 @@ impl FastCsvApp {
         };
 
         if total_rows == 0 {
-            self.go_to_row.open = false;
+            tab.go_to_row.open = false;
             return;
         }
 
@@ -2209,15 +2242,15 @@ impl FastCsvApp {
                 ui.horizontal(|ui| {
                     ui.label("Row number:");
                     let response = ui.add(
-                        egui::TextEdit::singleline(&mut self.go_to_row.input)
+                        egui::TextEdit::singleline(&mut tab.go_to_row.input)
                             .hint_text(format!("1 - {}", format_number(total_rows)))
                             .desired_width(150.0),
                     );
 
                     // Auto-focus on open
-                    if self.go_to_row.focus_input {
+                    if tab.go_to_row.focus_input {
                         response.request_focus();
-                        self.go_to_row.focus_input = false;
+                        tab.go_to_row.focus_input = false;
                     }
 
                     // Handle Enter key
@@ -2240,33 +2273,30 @@ impl FastCsvApp {
 
         if should_go {
             // Parse and validate row number
-            if let Ok(row_num) = self
-                .go_to_row
-                .input
-                .trim()
-                .replace(',', "")
-                .parse::<usize>()
-            {
+            if let Ok(row_num) = tab.go_to_row.input.trim().replace(',', "").parse::<usize>() {
                 if row_num >= 1 && row_num <= total_rows {
                     // Convert to 0-indexed
                     let row_idx = row_num - 1;
-                    self.go_to_row.scroll_to_row = Some(row_idx);
-                    self.go_to_row.highlight_row = Some(row_idx);
+                    tab.go_to_row.scroll_to_row = Some(row_idx);
+                    tab.go_to_row.highlight_row = Some(row_idx);
                     should_close = true;
                 }
             }
         }
 
         if should_close {
-            self.go_to_row.open = false;
+            tab.go_to_row.open = false;
         }
     }
 
     /// Open row detail popup for a specific row
     fn open_row_detail(&mut self, row_index: usize) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
         // Get the row data and headers
         let (fields, headers) = {
-            let state = self.state.read();
+            let state = tab.state.read();
             if let Some(csv) = &state.csv {
                 let fields = csv.parse_row(row_index).unwrap_or_default();
                 let headers = csv.headers.clone();
@@ -2276,27 +2306,30 @@ impl FastCsvApp {
             }
         };
 
-        self.row_detail.open = true;
-        self.row_detail.row_index = row_index;
-        self.row_detail.fields = fields;
-        self.row_detail.headers = headers;
-        self.row_detail.expanded_fields.clear();
+        tab.row_detail.open = true;
+        tab.row_detail.row_index = row_index;
+        tab.row_detail.fields = fields;
+        tab.row_detail.headers = headers;
+        tab.row_detail.expanded_fields.clear();
     }
 
     /// Render the row detail popup
     fn render_row_detail_popup(&mut self, ctx: &egui::Context) {
-        if !self.row_detail.open {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
+        if !tab.row_detail.open {
             return;
         }
 
         // Handle Escape to close
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.row_detail.open = false;
+            tab.row_detail.open = false;
             return;
         }
 
-        let row_num = format_number(self.row_detail.row_index + 1);
-        let num_fields = self.row_detail.fields.len();
+        let row_num = format_number(tab.row_detail.row_index + 1);
+        let num_fields = tab.row_detail.fields.len();
 
         let mut should_close = false;
         let mut open_json_for: Option<(usize, String, String)> = None;
@@ -2326,7 +2359,7 @@ impl FastCsvApp {
                         {
                             #[cfg(not(target_arch = "wasm32"))]
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let csv_row = self
+                                let csv_row = tab
                                     .row_detail
                                     .fields
                                     .iter()
@@ -2350,8 +2383,8 @@ impl FastCsvApp {
                             #[cfg(not(target_arch = "wasm32"))]
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let mut json_obj = serde_json::Map::new();
-                                for (i, field) in self.row_detail.fields.iter().enumerate() {
-                                    let header = self
+                                for (i, field) in tab.row_detail.fields.iter().enumerate() {
+                                    let header = tab
                                         .row_detail
                                         .headers
                                         .get(i)
@@ -2377,14 +2410,14 @@ impl FastCsvApp {
                     .auto_shrink([false, false])
                     .max_height(380.0)
                     .show(ui, |ui| {
-                        for (i, field) in self.row_detail.fields.iter().enumerate() {
-                            let header = self
+                        for (i, field) in tab.row_detail.fields.iter().enumerate() {
+                            let header = tab
                                 .row_detail
                                 .headers
                                 .get(i)
                                 .cloned()
                                 .unwrap_or_else(|| format!("Column {}", i + 1));
-                            let is_expanded = self.row_detail.expanded_fields.contains(&i);
+                            let is_expanded = tab.row_detail.expanded_fields.contains(&i);
                             let is_large = field.len() > 200;
                             let is_json = looks_like_json(field);
 
@@ -2440,7 +2473,7 @@ impl FastCsvApp {
                                                         .clicked()
                                                 {
                                                     open_json_for = Some((
-                                                        self.row_detail.row_index,
+                                                        tab.row_detail.row_index,
                                                         header.clone(),
                                                         field.clone(),
                                                     ));
@@ -2515,44 +2548,47 @@ impl FastCsvApp {
 
         // Handle toggle expand
         if let Some(idx) = toggle_expand {
-            if self.row_detail.expanded_fields.contains(&idx) {
-                self.row_detail.expanded_fields.remove(&idx);
+            if tab.row_detail.expanded_fields.contains(&idx) {
+                tab.row_detail.expanded_fields.remove(&idx);
             } else {
-                self.row_detail.expanded_fields.insert(idx);
+                tab.row_detail.expanded_fields.insert(idx);
             }
         }
 
         // Handle opening JSON viewer
         if let Some((row, col_name, value)) = open_json_for {
-            self.row_detail.open = false;
-            self.json_viewer.row = row;
-            self.json_viewer.col = 0;
-            self.json_viewer.column_name = col_name;
-            self.json_viewer.raw_content = value.clone();
+            tab.row_detail.open = false;
+            tab.json_viewer.row = row;
+            tab.json_viewer.col = 0;
+            tab.json_viewer.column_name = col_name;
+            tab.json_viewer.raw_content = value.clone();
             if let Some(formatted) = format_json(&value) {
-                self.json_viewer.formatted_content = formatted;
-                self.json_viewer.is_valid_json = true;
+                tab.json_viewer.formatted_content = formatted;
+                tab.json_viewer.is_valid_json = true;
             } else {
-                self.json_viewer.formatted_content = value;
-                self.json_viewer.is_valid_json = false;
+                tab.json_viewer.formatted_content = value;
+                tab.json_viewer.is_valid_json = false;
             }
-            self.json_viewer.open = true;
+            tab.json_viewer.open = true;
         }
 
         if should_close {
-            self.row_detail.open = false;
+            tab.row_detail.open = false;
         }
     }
 
     /// Render the filter popup for a column
     fn render_filter_popup(&mut self, ctx: &egui::Context) {
-        let Some(col_idx) = self.filter_state.active_popup else {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
+        let Some(col_idx) = tab.filter_state.active_popup else {
             return;
         };
 
         // Get column name for title
         let col_name = {
-            let state = self.state.read();
+            let state = tab.state.read();
             state
                 .csv
                 .as_ref()
@@ -2562,7 +2598,7 @@ impl FastCsvApp {
 
         // Handle Escape to close
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.filter_state.close_popup();
+            tab.filter_state.close_popup();
             return;
         }
 
@@ -2582,11 +2618,11 @@ impl FastCsvApp {
                 ui.horizontal(|ui| {
                     ui.label("Operator:");
                     egui::ComboBox::from_id_salt("filter_operator")
-                        .selected_text(self.filter_state.selected_operator.display_name())
+                        .selected_text(tab.filter_state.selected_operator.display_name())
                         .show_ui(ui, |ui| {
                             for op in FilterOperator::all() {
                                 ui.selectable_value(
-                                    &mut self.filter_state.selected_operator,
+                                    &mut tab.filter_state.selected_operator,
                                     *op,
                                     op.display_name(),
                                 );
@@ -2598,13 +2634,13 @@ impl FastCsvApp {
 
                 // Value input (not needed for Empty/NotEmpty)
                 let needs_value = !matches!(
-                    self.filter_state.selected_operator,
+                    tab.filter_state.selected_operator,
                     FilterOperator::Empty | FilterOperator::NotEmpty
                 );
                 if needs_value {
                     ui.horizontal(|ui| {
                         ui.label("Value:");
-                        let response = ui.text_edit_singleline(&mut self.filter_state.filter_input);
+                        let response = ui.text_edit_singleline(&mut tab.filter_state.filter_input);
                         // Apply on Enter
                         if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                             should_apply = true;
@@ -2619,7 +2655,7 @@ impl FastCsvApp {
                     if ui.button("Apply").clicked() {
                         should_apply = true;
                     }
-                    if self.filter_state.has_filter(col_idx) && ui.button("Clear").clicked() {
+                    if tab.filter_state.has_filter(col_idx) && ui.button("Clear").clicked() {
                         should_clear = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -2630,34 +2666,37 @@ impl FastCsvApp {
 
         // Handle actions after UI
         if should_apply {
-            let operator = self.filter_state.selected_operator;
-            let value = self.filter_state.filter_input.clone();
-            self.filter_state.apply_filter(col_idx, operator, value);
+            let operator = tab.filter_state.selected_operator;
+            let value = tab.filter_state.filter_input.clone();
+            tab.filter_state.apply_filter(col_idx, operator, value);
             self.mark_filter_changed();
         } else if should_clear {
-            self.filter_state.clear_filter(col_idx);
-            self.filter_state.close_popup();
+            tab.filter_state.clear_filter(col_idx);
+            tab.filter_state.close_popup();
             self.mark_filter_changed();
         } else if should_close {
-            self.filter_state.close_popup();
+            tab.filter_state.close_popup();
         }
     }
 
     /// Render the Column Manager dialog
     fn render_column_manager(&mut self, ctx: &egui::Context) {
-        if !self.column_state.manager_open {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
+        if !tab.column_state.manager_open {
             return;
         }
 
         // Handle Escape to close
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.column_state.manager_open = false;
+            tab.column_state.manager_open = false;
             return;
         }
 
         // Get headers from state
         let headers = {
-            let state = self.state.read();
+            let state = tab.state.read();
             state
                 .csv
                 .as_ref()
@@ -2666,12 +2705,12 @@ impl FastCsvApp {
         };
 
         if headers.is_empty() {
-            self.column_state.manager_open = false;
+            tab.column_state.manager_open = false;
             return;
         }
 
         // Initialize column order if needed
-        self.column_state.init_column_order(headers.len());
+        tab.column_state.init_column_order(headers.len());
 
         let mut should_close = false;
         let mut move_up: Option<usize> = None;
@@ -2688,29 +2727,29 @@ impl FastCsvApp {
                 // Action buttons at top
                 ui.horizontal(|ui| {
                     if ui.button("Show All").clicked() {
-                        self.column_state.show_all_columns();
+                        tab.column_state.show_all_columns();
                     }
                     if ui.button("Hide All").clicked() {
-                        self.column_state.hide_all_columns();
+                        tab.column_state.hide_all_columns();
                     }
                     if ui.button("Reset Order").clicked() {
-                        self.column_state.reset_column_order();
+                        tab.column_state.reset_column_order();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let undo_enabled = !self.column_state.undo_stack.is_empty();
-                        let redo_enabled = !self.column_state.redo_stack.is_empty();
+                        let undo_enabled = !tab.column_state.undo_stack.is_empty();
+                        let redo_enabled = !tab.column_state.redo_stack.is_empty();
 
                         if ui
                             .add_enabled(redo_enabled, egui::Button::new("Redo"))
                             .clicked()
                         {
-                            self.column_state.redo();
+                            tab.column_state.redo();
                         }
                         if ui
                             .add_enabled(undo_enabled, egui::Button::new("Undo"))
                             .clicked()
                         {
-                            self.column_state.undo();
+                            tab.column_state.undo();
                         }
                     });
                 });
@@ -2725,8 +2764,8 @@ impl FastCsvApp {
                     .max_height(350.0)
                     .show(ui, |ui| {
                         // Show columns in their current display order
-                        let column_order = self.column_state.column_order.clone();
-                        let visible_columns = self.column_state.get_visible_columns();
+                        let column_order = tab.column_state.column_order.clone();
+                        let visible_columns = tab.column_state.get_visible_columns();
 
                         // Build a map: original_idx -> visible_index
                         let original_to_visible: std::collections::HashMap<usize, usize> = visible_columns
@@ -2741,14 +2780,14 @@ impl FastCsvApp {
                             }
 
                             let header = &headers[original_idx];
-                            let is_hidden = self.column_state.hidden_columns.contains(&original_idx);
+                            let is_hidden = tab.column_state.hidden_columns.contains(&original_idx);
                             let visible_idx = original_to_visible.get(&original_idx);
 
                             ui.horizontal(|ui| {
                                 // Visibility checkbox
                                 let mut visible = !is_hidden;
                                 if ui.checkbox(&mut visible, "").changed() {
-                                    self.column_state.toggle_column(original_idx);
+                                    tab.column_state.toggle_column(original_idx);
                                 }
 
                                 // Column name
@@ -2810,7 +2849,7 @@ impl FastCsvApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "{} of {} columns visible",
-                        self.column_state.get_visible_columns().len(),
+                        tab.column_state.get_visible_columns().len(),
                         headers.len()
                     ))
                     .small()
@@ -2839,18 +2878,18 @@ impl FastCsvApp {
         // Handle column moves (work on visible columns only)
         if let Some(idx) = move_up {
             if idx > 0 {
-                self.column_state.reorder_visible_columns(idx, idx - 1);
+                tab.column_state.reorder_visible_columns(idx, idx - 1);
             }
         }
         if let Some(idx) = move_down {
-            let visible_count = self.column_state.get_visible_columns().len();
+            let visible_count = tab.column_state.get_visible_columns().len();
             if idx < visible_count - 1 {
-                self.column_state.reorder_visible_columns(idx, idx + 1);
+                tab.column_state.reorder_visible_columns(idx, idx + 1);
             }
         }
 
         if should_close {
-            self.column_state.manager_open = false;
+            tab.column_state.manager_open = false;
         }
     }
 }
@@ -2907,50 +2946,60 @@ impl eframe::App for FastCsvApp {
         }
 
         // Handle keyboard shortcuts
-        ctx.input(|i| {
-            // Cmd/Ctrl+F to toggle search
-            if i.modifiers.command && i.key_pressed(Key::F) {
-                tab.search.visible = !tab.search.visible;
-                if tab.search.visible {
-                    // Request focus on the search input and select all text
-                    tab.search.focus_input = true;
+        // Collect actions first, then apply them after dropping tab borrow
+        let mut actions = Vec::new();
+        {
+            let tab = &mut self.tabs[self.active_tab_index];
+            ctx.input(|i| {
+                // Cmd/Ctrl+F to toggle search
+                if i.modifiers.command && i.key_pressed(Key::F) {
+                    tab.search.visible = !tab.search.visible;
+                    if tab.search.visible {
+                        tab.search.focus_input = true;
+                    }
                 }
-                // Note: We don't clear the query when closing - it persists for convenience
-            }
-            // Escape to close search (keeps query text for convenience)
-            if i.key_pressed(Key::Escape) && tab.search.visible {
-                tab.search.cancel_flag.store(true, Ordering::SeqCst);
-                tab.search.visible = false;
-                // Reset history navigation
-                tab.search.history_index = None;
-            }
-            // F3 or Cmd+G for next match
-            if i.key_pressed(Key::F3) || (i.modifiers.command && i.key_pressed(Key::G)) {
-                if i.modifiers.shift {
-                    self.prev_match();
-                } else {
-                    self.next_match();
+                // Escape to close search
+                if i.key_pressed(Key::Escape) && tab.search.visible {
+                    tab.search.cancel_flag.store(true, Ordering::SeqCst);
+                    tab.search.visible = false;
+                    tab.search.history_index = None;
                 }
+                // F3 or Cmd+G for next/prev match
+                if i.key_pressed(Key::F3) || (i.modifiers.command && i.key_pressed(Key::G)) {
+                    if i.modifiers.shift {
+                        actions.push("prev_match");
+                    } else {
+                        actions.push("next_match");
+                    }
+                }
+                // Cmd+L to open Go to Row dialog
+                if i.modifiers.command && i.key_pressed(Key::L) {
+                    tab.go_to_row.open = true;
+                    tab.go_to_row.focus_input = true;
+                    tab.go_to_row.input.clear();
+                }
+                // Cmd+Shift+C to open Column Manager
+                if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::C) {
+                    tab.column_state.manager_open = true;
+                }
+                // Cmd+Z for undo column actions
+                if i.modifiers.command && i.key_pressed(Key::Z) && !i.modifiers.shift {
+                    tab.column_state.undo();
+                }
+                // Cmd+Shift+Z for redo column actions
+                if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::Z) {
+                    tab.column_state.redo();
+                }
+            });
+        }
+        // Apply actions after dropping tab borrow
+        for action in actions {
+            match action {
+                "next_match" => self.next_match(),
+                "prev_match" => self.prev_match(),
+                _ => {}
             }
-            // Cmd+L to open Go to Row dialog
-            if i.modifiers.command && i.key_pressed(Key::L) {
-                tab.go_to_row.open = true;
-                tab.go_to_row.focus_input = true;
-                tab.go_to_row.input.clear();
-            }
-            // Cmd+Shift+C to open Column Manager
-            if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::C) {
-                tab.column_state.manager_open = true;
-            }
-            // Cmd+Z for undo column actions
-            if i.modifiers.command && i.key_pressed(Key::Z) && !i.modifiers.shift {
-                tab.column_state.undo();
-            }
-            // Cmd+Shift+Z for redo column actions
-            if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::Z) {
-                tab.column_state.redo();
-            }
-        });
+        }
 
         // Top panel with menu/toolbar
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -3013,38 +3062,44 @@ impl eframe::App for FastCsvApp {
                     }
                 });
                 ui.menu_button("Edit", |ui: &mut egui::Ui| {
+                    self.ensure_tabs();
+                    let tab = self.active_tab_mut();
                     if ui.button("Find... (⌘+F)").clicked() {
                         ui.close();
-                        self.search.visible = true;
-                        self.search.focus_input = true;
+                        tab.search.visible = true;
+                        tab.search.focus_input = true;
                     }
-                    let has_nav_rows = !self.search.results.read().navigation_rows.is_empty();
-                    if ui
+                    let has_nav_rows = !tab.search.results.read().navigation_rows.is_empty();
+                    let should_next = ui
                         .add_enabled(has_nav_rows, egui::Button::new("Find Next (F3)"))
-                        .clicked()
-                    {
+                        .clicked();
+                    let should_prev = ui
+                        .add_enabled(has_nav_rows, egui::Button::new("Find Previous (⇧F3)"))
+                        .clicked();
+                    let should_go_to_row = ui.button("Go to Row... (⌘+L)").clicked();
+                    // Drop tab borrow before calling methods
+                    if should_next {
+                        drop(tab);
                         ui.close();
                         self.next_match();
-                    }
-                    if ui
-                        .add_enabled(has_nav_rows, egui::Button::new("Find Previous (⇧F3)"))
-                        .clicked()
-                    {
+                    } else if should_prev {
+                        drop(tab);
                         ui.close();
                         self.prev_match();
+                    } else if should_go_to_row {
+                        ui.close();
+                        tab.go_to_row.open = true;
+                        tab.go_to_row.focus_input = true;
+                        tab.go_to_row.input.clear();
                     }
                     ui.separator();
-                    if ui.button("Go to Row... (⌘+L)").clicked() {
-                        ui.close();
-                        self.go_to_row.open = true;
-                        self.go_to_row.focus_input = true;
-                        self.go_to_row.input.clear();
-                    }
                 });
                 ui.menu_button("View", |ui: &mut egui::Ui| {
+                    self.ensure_tabs();
+                    let tab = self.active_tab_mut();
                     if ui.button("Column Manager... (⌘+Shift+C)").clicked() {
                         ui.close();
-                        self.column_state.manager_open = true;
+                        tab.column_state.manager_open = true;
                     }
                     ui.separator();
                     let theme_label = if self.dark_mode {
@@ -3072,7 +3127,12 @@ impl eframe::App for FastCsvApp {
         });
 
         // Search bar panel (shown below menu when search is active)
-        if self.search.visible {
+        self.ensure_tabs();
+        let search_visible = {
+            let tab = &self.tabs[self.active_tab_index];
+            tab.search.visible
+        };
+        if search_visible {
             egui::TopBottomPanel::top("search_panel")
                 .exact_height(36.0)
                 .show(ctx, |ui| {
@@ -3082,9 +3142,9 @@ impl eframe::App for FastCsvApp {
         }
 
         // Update available banner
-        if self.update_state.update_available.load(Ordering::Relaxed)
-            && !self.update_state.dismissed
-        {
+        let update_available = self.update_state.update_available.load(Ordering::Relaxed);
+        let update_dismissed = self.update_state.dismissed;
+        if update_available && !update_dismissed {
             egui::TopBottomPanel::top("update_banner")
                 .exact_height(32.0)
                 .show(ctx, |ui| {
@@ -3163,10 +3223,12 @@ impl eframe::App for FastCsvApp {
         // Central panel with table
         egui::CentralPanel::default().show(ctx, |ui| {
             self.ensure_tabs();
-            let tab = self.active_tab();
-            let state = tab.state.read();
-            let load_state = state.load_state;
-            drop(state);
+            // Get load_state first without holding tab borrow
+            let load_state = {
+                let tab = &self.tabs[self.active_tab_index];
+                let state = tab.state.read();
+                state.load_state.clone()
+            };
 
             // Expand window when file is loaded (only once, native only)
             #[cfg(not(target_arch = "wasm32"))]
@@ -3307,7 +3369,7 @@ impl eframe::App for FastCsvApp {
                         ui.vertical_centered(|ui| {
                             ui.spinner();
                             ui.add_space(10.0);
-                            let state = self.state.read();
+                            let state = tab.state.read();
                             let rows = state.rows_indexed.load(Ordering::Relaxed);
                             ui.label(format!(
                                 "Indexing file... {} rows found",
@@ -3324,7 +3386,7 @@ impl eframe::App for FastCsvApp {
                 LoadState::Error => {
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
-                            let state = self.state.read();
+                            let state = tab.state.read();
                             ui.colored_label(
                                 egui::Color32::RED,
                                 format!(
