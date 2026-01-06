@@ -168,3 +168,171 @@ impl FilterState {
         self.filter_input.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // FilterCondition::matches tests
+    #[test]
+    fn test_contains_operator() {
+        let condition = FilterCondition {
+            operator: FilterOperator::Contains,
+            value: "hello".to_string(),
+        };
+        assert!(condition.matches("Hello World"));
+        assert!(condition.matches("say hello"));
+        assert!(!condition.matches("Hi World"));
+    }
+
+    #[test]
+    fn test_equals_operator() {
+        let condition = FilterCondition {
+            operator: FilterOperator::Equals,
+            value: "test".to_string(),
+        };
+        assert!(condition.matches("Test"));
+        assert!(condition.matches("TEST"));
+        assert!(!condition.matches("testing"));
+    }
+
+    #[test]
+    fn test_starts_with_operator() {
+        let condition = FilterCondition {
+            operator: FilterOperator::StartsWith,
+            value: "hello".to_string(),
+        };
+        assert!(condition.matches("Hello World"));
+        assert!(!condition.matches("Say Hello"));
+    }
+
+    #[test]
+    fn test_ends_with_operator() {
+        let condition = FilterCondition {
+            operator: FilterOperator::EndsWith,
+            value: "world".to_string(),
+        };
+        assert!(condition.matches("Hello World"));
+        assert!(!condition.matches("World Hello"));
+    }
+
+    #[test]
+    fn test_greater_than_numeric() {
+        let condition = FilterCondition {
+            operator: FilterOperator::GreaterThan,
+            value: "100".to_string(),
+        };
+        assert!(condition.matches("150"));
+        assert!(condition.matches("100.5"));
+        assert!(!condition.matches("50"));
+        assert!(!condition.matches("100"));
+    }
+
+    #[test]
+    fn test_less_than_numeric() {
+        let condition = FilterCondition {
+            operator: FilterOperator::LessThan,
+            value: "100".to_string(),
+        };
+        assert!(condition.matches("50"));
+        assert!(condition.matches("99.9"));
+        assert!(!condition.matches("150"));
+        assert!(!condition.matches("100"));
+    }
+
+    #[test]
+    fn test_greater_than_string_fallback() {
+        let condition = FilterCondition {
+            operator: FilterOperator::GreaterThan,
+            value: "apple".to_string(),
+        };
+        assert!(condition.matches("banana"));
+        assert!(!condition.matches("aardvark"));
+    }
+
+    #[test]
+    fn test_empty_operator() {
+        let condition = FilterCondition {
+            operator: FilterOperator::Empty,
+            value: String::new(),
+        };
+        assert!(condition.matches(""));
+        assert!(condition.matches("   "));
+        assert!(!condition.matches("text"));
+    }
+
+    #[test]
+    fn test_not_empty_operator() {
+        let condition = FilterCondition {
+            operator: FilterOperator::NotEmpty,
+            value: String::new(),
+        };
+        assert!(condition.matches("text"));
+        assert!(!condition.matches(""));
+        assert!(!condition.matches("   "));
+    }
+
+    // FilterState tests
+    #[test]
+    fn test_has_active_filters() {
+        let mut state = FilterState::default();
+        assert!(!state.has_active_filters());
+
+        state.apply_filter(0, FilterOperator::Contains, "test".to_string());
+        assert!(state.has_active_filters());
+
+        state.clear_filter(0);
+        assert!(!state.has_active_filters());
+    }
+
+    #[test]
+    fn test_row_matches_single_filter() {
+        let mut state = FilterState::default();
+        state.apply_filter(1, FilterOperator::Equals, "Engineering".to_string());
+
+        let row1 = vec![
+            "1".to_string(),
+            "Engineering".to_string(),
+            "Alice".to_string(),
+        ];
+        let row2 = vec!["2".to_string(), "Sales".to_string(), "Bob".to_string()];
+
+        assert!(state.row_matches(&row1));
+        assert!(!state.row_matches(&row2));
+    }
+
+    #[test]
+    fn test_row_matches_multiple_filters() {
+        let mut state = FilterState::default();
+        state.apply_filter(1, FilterOperator::Equals, "Engineering".to_string());
+        state.apply_filter(2, FilterOperator::GreaterThan, "50000".to_string());
+
+        let row1 = vec![
+            "1".to_string(),
+            "Engineering".to_string(),
+            "75000".to_string(),
+        ];
+        let row2 = vec![
+            "2".to_string(),
+            "Engineering".to_string(),
+            "40000".to_string(),
+        ];
+        let row3 = vec!["3".to_string(), "Sales".to_string(), "75000".to_string()];
+
+        assert!(state.row_matches(&row1)); // Both match
+        assert!(!state.row_matches(&row2)); // Salary too low
+        assert!(!state.row_matches(&row3)); // Wrong dept
+    }
+
+    #[test]
+    fn test_row_matches_missing_column() {
+        let mut state = FilterState::default();
+        state.apply_filter(5, FilterOperator::Empty, String::new());
+
+        // Row only has 3 columns, filter is on column 5
+        let row = vec!["1".to_string(), "Test".to_string(), "Value".to_string()];
+
+        // Missing column treated as empty, Empty filter should match
+        assert!(state.row_matches(&row));
+    }
+}
