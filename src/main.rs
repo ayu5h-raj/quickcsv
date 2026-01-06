@@ -27,7 +27,7 @@ use csv::init_csv_progressive;
 use state::{
     ColumnState, FilterCondition, FilterOperator, FilterState, GoToRowState, JsonViewerState,
     LoadState, RowDetailState, SearchState, SearchStatus, SharedState, SortDirection, SortState,
-    MAX_NAV_ROWS,
+    TabState, MAX_NAV_ROWS,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use update::check_for_updates;
@@ -136,80 +136,27 @@ impl RecentFiles {
 
 /// Main application state
 struct FastCsvApp {
-    /// Shared state with background thread
-    state: Arc<RwLock<SharedState>>,
-    /// Vertical scroll offset
-    scroll_y: f32,
-    /// Horizontal scroll offset
-    scroll_x: f32,
-    /// Column widths (auto-sized or user-adjusted)
-    column_widths: Vec<f32>,
-    /// Row cache for rendering (row_index -> parsed fields)
-    row_cache: std::collections::HashMap<usize, Vec<String>>,
-    /// Last visible row range for cache invalidation
-    last_visible_range: (usize, usize),
-    /// Search state
-    search: SearchState,
-    /// JSON viewer popup state
-    json_viewer: JsonViewerState,
-    /// Dark mode enabled (true = dark, false = light)
+    /// Tabs (one per open file)
+    tabs: Vec<TabState>,
+    /// Index of currently active tab
+    active_tab_index: usize,
+    /// Dark mode enabled (true = dark, false = light) - shared across all tabs
     dark_mode: bool,
-    /// Column sort state
-    sort_state: SortState,
-    /// Go to row dialog state
-    go_to_row: GoToRowState,
-    /// Row detail popup state
-    row_detail: RowDetailState,
-    /// Update checker state
+    /// Update checker state - shared across all tabs
     update_state: UpdateState,
-    /// Column state (visibility, order, undo/redo)
-    column_state: ColumnState,
-    /// Filter state for column filtering
-    filter_state: FilterState,
-    /// Cached filtered row indices (None = no filter, Some = indices that pass filter)
-    filtered_indices: Option<Vec<usize>>,
-    /// Total row count (before filtering) for status bar
-    total_row_count: usize,
-    /// Filter version (increments when filter changes, used to trigger recompute)
-    filter_version: u32,
-    /// Last computed filter version (to detect when recompute is needed)
-    last_filter_version: u32,
-    /// Track previous sorting state to detect completion
-    was_sorting: bool,
-    /// Channel to receive filtered indices from background thread
-    #[allow(clippy::type_complexity)]
-    filter_receiver: Option<
-        mpsc::Receiver<(
-            Vec<usize>,
-            std::collections::HashMap<usize, FilterCondition>,
-            Option<usize>,
-            SortDirection,
-            std::time::Duration,
-        )>,
-    >,
-    /// Whether filtering is currently in progress
-    is_filtering: Arc<AtomicBool>,
-    /// Optimization: Filters that were applied to generate current result
-    applied_filters: std::collections::HashMap<usize, FilterCondition>,
-    /// Optimization: Sort column used to generate current result
-    applied_sort_column: Option<usize>,
-    /// Optimization: Sort direction used to generate current result
-    applied_sort_direction: SortDirection,
-    /// Duration of last filter operation (for display)
-    filter_duration: Option<std::time::Duration>,
-    /// Channel for receiving loaded file data from async web tasks (WASM)
-    #[cfg(target_arch = "wasm32")]
-    file_loader_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
-    /// Channel receiver for file data (WASM)
-    #[cfg(target_arch = "wasm32")]
-    file_loader_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
-    /// Recent files list
+    /// Recent files list - shared across all tabs
     recent_files: RecentFiles,
     /// Whether recent files have been loaded from storage
     recent_files_loaded: bool,
     /// Whether window has been expanded after file load
     #[allow(dead_code)] // Used in native code only
     window_expanded: bool,
+    /// Channel for receiving loaded file data from async web tasks (WASM)
+    #[cfg(target_arch = "wasm32")]
+    file_loader_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
+    /// Channel receiver for file data (WASM)
+    #[cfg(target_arch = "wasm32")]
+    file_loader_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
 }
 
 impl Default for FastCsvApp {
@@ -217,45 +164,49 @@ impl Default for FastCsvApp {
         #[cfg(target_arch = "wasm32")]
         let (tx, rx) = std::sync::mpsc::channel();
 
+        // Start with one empty tab
+        let mut tabs = Vec::new();
+        tabs.push(TabState::new_empty());
+
         Self {
-            state: Arc::new(RwLock::new(SharedState::default())),
-            scroll_y: 0.0,
-            scroll_x: 0.0,
-            column_widths: Vec::new(),
-            row_cache: std::collections::HashMap::new(),
-            last_visible_range: (0, 0),
-            search: SearchState::default(),
-            json_viewer: JsonViewerState::default(),
+            tabs,
+            active_tab_index: 0,
             dark_mode: true, // Default to dark mode
-            sort_state: SortState::default(),
-            go_to_row: GoToRowState::default(),
-            row_detail: RowDetailState::default(),
             update_state: UpdateState::default(),
-            column_state: ColumnState::default(),
-            filter_state: FilterState::default(),
-            filtered_indices: None,
-            total_row_count: 0,
-            filter_version: 0,
-            last_filter_version: 0,
-            was_sorting: false,
-            filter_receiver: None,
-            is_filtering: Arc::new(AtomicBool::new(false)),
-            applied_filters: std::collections::HashMap::new(),
-            applied_sort_column: None,
-            applied_sort_direction: SortDirection::None,
-            filter_duration: None,
+            recent_files: RecentFiles::default(),
+            recent_files_loaded: false,
+            window_expanded: false,
             #[cfg(target_arch = "wasm32")]
             file_loader_tx: tx,
             #[cfg(target_arch = "wasm32")]
             file_loader_rx: rx,
-            recent_files: RecentFiles::default(),
-            recent_files_loaded: false,
-            window_expanded: false,
         }
     }
 }
 
 impl FastCsvApp {
+    /// Get mutable reference to active tab
+    fn active_tab_mut(&mut self) -> &mut TabState {
+        &mut self.tabs[self.active_tab_index]
+    }
+
+    /// Get reference to active tab
+    fn active_tab(&self) -> &TabState {
+        &self.tabs[self.active_tab_index]
+    }
+
+    /// Ensure we have at least one tab
+    fn ensure_tabs(&mut self) {
+        if self.tabs.is_empty() {
+            self.tabs.push(TabState::new_empty());
+            self.active_tab_index = 0;
+        }
+        // Ensure active_tab_index is valid
+        if self.active_tab_index >= self.tabs.len() {
+            self.active_tab_index = self.tabs.len().saturating_sub(1);
+        }
+    }
+
     /// Load recent files from storage
     #[cfg(not(target_arch = "wasm32"))]
     fn load_recent_files(&mut self) {
@@ -337,12 +288,15 @@ impl FastCsvApp {
     /// Open a file dialog and queue the file for loading (WASM)
     #[cfg(target_arch = "wasm32")]
     fn open_file(&mut self, ctx: &egui::Context) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
         let task = rfd::AsyncFileDialog::new()
             .add_filter("CSV", &["csv", "tsv", "txt"])
             .pick_file();
 
         let tx = self.file_loader_tx.clone();
-        let state = self.state.clone();
+        let state = tab.state.clone();
         let ctx = ctx.clone();
 
         wasm_bindgen_futures::spawn_local(async move {
@@ -370,23 +324,26 @@ impl FastCsvApp {
     /// Process a loaded file (WASM) - called from update() when channel receives data
     #[cfg(target_arch = "wasm32")]
     fn load_file_web(&mut self, name: String, bytes: Vec<u8>, ctx: egui::Context) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
         // Reset state
-        self.scroll_y = 0.0;
-        self.scroll_x = 0.0;
-        self.column_widths.clear();
-        self.row_cache.clear();
-        self.last_visible_range = (0, 0);
-        self.sort_state = SortState::default();
-        self.column_state = ColumnState::default();
-        self.filter_state = FilterState::default();
-        self.filtered_indices = None;
-        self.applied_filters.clear();
-        self.applied_sort_column = None;
-        self.search.cancel_flag.store(true, Ordering::SeqCst);
-        self.search.current_index = 0;
-        self.search.active_query.clear();
+        tab.scroll_y = 0.0;
+        tab.scroll_x = 0.0;
+        tab.column_widths.clear();
+        tab.row_cache.clear();
+        tab.last_visible_range = (0, 0);
+        tab.sort_state = SortState::default();
+        tab.column_state = ColumnState::default();
+        tab.filter_state = FilterState::default();
+        tab.filtered_indices = None;
+        tab.applied_filters.clear();
+        tab.applied_sort_column = None;
+        tab.search.cancel_flag.store(true, Ordering::SeqCst);
+        tab.search.current_index = 0;
+        tab.search.active_query.clear();
         {
-            let mut results = self.search.results.write();
+            let mut results = tab.search.results.write();
             results.navigation_rows.clear();
             results.total_match_count = 0;
             results.status = SearchStatus::Idle;
@@ -396,7 +353,7 @@ impl FastCsvApp {
 
         // Set loading state
         {
-            let mut state_guard = self.state.write();
+            let mut state_guard = tab.state.write();
             state_guard.csv = None;
             state_guard.load_state = LoadState::Indexing;
             state_guard.error_message = None;
@@ -408,7 +365,7 @@ impl FastCsvApp {
         }
 
         // Use init_csv_web for synchronous parsing
-        let state = Arc::clone(&self.state);
+        let state = Arc::clone(&tab.state);
         let result = csv::init_csv_web(name.clone(), bytes, &state, &ctx);
 
         if let Err(e) = result {
@@ -417,6 +374,9 @@ impl FastCsvApp {
             state_guard.error_message = Some(e);
             ctx.request_repaint();
         } else {
+            // Update tab file info
+            tab.file_path = name.clone();
+            tab.file_name = name.clone();
             // Add to recent files
             self.recent_files.add_file(name.clone(), name);
             self.save_recent_files();
@@ -426,9 +386,12 @@ impl FastCsvApp {
     /// Open a file dialog and load the selected CSV file (Native)
     #[cfg(not(target_arch = "wasm32"))]
     fn open_file(&mut self, ctx: &egui::Context) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
         // Cancel any ongoing indexing
         {
-            let state = self.state.read();
+            let state = tab.state.read();
             state.cancel_indexing.store(true, Ordering::Relaxed);
         }
 
@@ -438,6 +401,10 @@ impl FastCsvApp {
             .add_filter("All Files", &["*"])
             .pick_file()
         {
+            // Create new tab for the file
+            let new_tab = TabState::from_path(path.clone());
+            self.tabs.push(new_tab);
+            self.active_tab_index = self.tabs.len() - 1;
             self.load_file(path, ctx.clone());
         }
     }
@@ -445,33 +412,36 @@ impl FastCsvApp {
     /// Load a CSV file in the background (Native)
     #[cfg(not(target_arch = "wasm32"))]
     fn load_file(&mut self, path: PathBuf, ctx: egui::Context) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
         // Reset state
-        self.scroll_y = 0.0;
-        self.scroll_x = 0.0;
-        self.column_widths.clear();
-        self.row_cache.clear();
-        self.last_visible_range = (0, 0);
+        tab.scroll_y = 0.0;
+        tab.scroll_x = 0.0;
+        tab.column_widths.clear();
+        tab.row_cache.clear();
+        tab.last_visible_range = (0, 0);
         // Reset sort state
-        self.sort_state = SortState::default();
+        tab.sort_state = SortState::default();
         // Reset column state (visibility, order)
-        self.column_state = ColumnState::default();
+        tab.column_state = ColumnState::default();
         // Reset filter state
-        self.filter_state = FilterState::default();
-        self.filtered_indices = None;
-        self.filter_version = 0;
-        self.last_filter_version = 0;
-        self.filter_receiver = None;
-        self.is_filtering.store(false, Ordering::Relaxed);
-        self.applied_filters.clear();
-        self.applied_sort_column = None;
-        self.applied_sort_direction = SortDirection::None;
-        self.filter_duration = None;
+        tab.filter_state = FilterState::default();
+        tab.filtered_indices = None;
+        tab.filter_version = 0;
+        tab.last_filter_version = 0;
+        tab.filter_receiver = None;
+        tab.is_filtering.store(false, Ordering::Relaxed);
+        tab.applied_filters.clear();
+        tab.applied_sort_column = None;
+        tab.applied_sort_direction = SortDirection::None;
+        tab.filter_duration = None;
         // Cancel any ongoing search and clear results
-        self.search.cancel_flag.store(true, Ordering::SeqCst);
-        self.search.current_index = 0;
-        self.search.active_query.clear();
+        tab.search.cancel_flag.store(true, Ordering::SeqCst);
+        tab.search.current_index = 0;
+        tab.search.active_query.clear();
         {
-            let mut results = self.search.results.write();
+            let mut results = tab.search.results.write();
             results.navigation_rows.clear();
             results.total_match_count = 0;
             results.status = SearchStatus::Idle;
@@ -481,7 +451,7 @@ impl FastCsvApp {
 
         // Set loading state
         {
-            let mut state = self.state.write();
+            let mut state = tab.state.write();
             state.csv = None;
             state.load_state = LoadState::Indexing;
             state.error_message = None;
@@ -490,7 +460,7 @@ impl FastCsvApp {
             state.indexing_complete.store(false, Ordering::Relaxed);
         }
 
-        let state = Arc::clone(&self.state);
+        let state = Arc::clone(&tab.state);
         let path_clone = path.clone();
         let path_str = path.to_string_lossy().to_string();
         let file_name = path
@@ -499,8 +469,12 @@ impl FastCsvApp {
             .unwrap_or(&path_str)
             .to_string();
 
+        // Update tab file info
+        tab.file_path = path_str.clone();
+        tab.file_name = file_name.clone();
+
         // Add to recent files
-        self.recent_files.add_file(path_str.clone(), file_name);
+        self.recent_files.add_file(path_str, file_name);
         self.save_recent_files();
 
         // Start progressive loading - shows data immediately while indexing continues
@@ -518,61 +492,65 @@ impl FastCsvApp {
 
     /// Increment filter version to trigger recompute
     fn mark_filter_changed(&mut self) {
-        self.filter_version = self.filter_version.wrapping_add(1);
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+        tab.filter_version = tab.filter_version.wrapping_add(1);
         // Don't clear indices/cache here to avoid flashing content.
         // They will be updated when async task completes.
     }
 
     /// Start async filtering task
-    /// Start async filtering task
     fn start_async_filtering(&mut self, _ctx: &egui::Context) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
         // If no filters are active, clear filtered indices immediately
-        if !self.filter_state.has_active_filters() {
-            self.filtered_indices = None;
-            self.last_filter_version = self.filter_version;
-            self.applied_filters.clear(); // Clear applied state
+        if !tab.filter_state.has_active_filters() {
+            tab.filtered_indices = None;
+            tab.last_filter_version = tab.filter_version;
+            tab.applied_filters.clear(); // Clear applied state
             return;
         }
 
         // Check if we are already filtering
-        if self.is_filtering.load(Ordering::Relaxed) {
+        if tab.is_filtering.load(Ordering::Relaxed) {
             // If already filtering, maybe we should cancel previous?
             // For now, simple implementation: just start new one, late comer wins visually
             // but cleaner would be cancellation.
         }
 
-        self.is_filtering.store(true, Ordering::Relaxed);
-        self.last_filter_version = self.filter_version;
+        tab.is_filtering.store(true, Ordering::Relaxed);
+        tab.last_filter_version = tab.filter_version;
 
         // Clone state for thread
-        let state = self.state.clone();
-        let filter_state = self.filter_state.clone();
+        let state = tab.state.clone();
+        let filter_state = tab.filter_state.clone();
 
         // Snapshot current state for optimization check and return
-        let current_filters = self.filter_state.filters.clone();
-        let sort_col = self.sort_state.column;
-        let sort_dir = self.sort_state.direction;
+        let current_filters = tab.filter_state.filters.clone();
+        let sort_col = tab.sort_state.column;
+        let sort_dir = tab.sort_state.direction;
 
         // Check for optimization:
-        let can_optimize = self.filtered_indices.is_some()
-            && self.applied_sort_column == sort_col
-            && self.applied_sort_direction == sort_dir
-            && current_filters.len() > self.applied_filters.len()
-            && self
+        let can_optimize = tab.filtered_indices.is_some()
+            && tab.applied_sort_column == sort_col
+            && tab.applied_sort_direction == sort_dir
+            && current_filters.len() > tab.applied_filters.len()
+            && tab
                 .applied_filters
                 .iter()
                 .all(|(k, v)| current_filters.get(k) == Some(v));
 
         let initial_indices = if can_optimize {
-            self.filtered_indices.clone()
+            tab.filtered_indices.clone()
         } else {
             None
         };
 
         // Capture sort state for consistent ordering
         let sorted_indices = {
-            let guard = self.sort_state.sorted_indices.read();
-            if self.sort_state.direction != SortDirection::None && !guard.is_empty() {
+            let guard = tab.sort_state.sorted_indices.read();
+            if tab.sort_state.direction != SortDirection::None && !guard.is_empty() {
                 Some(guard.clone())
             } else {
                 None
@@ -581,9 +559,9 @@ impl FastCsvApp {
 
         // Create channel
         let (sender, receiver) = mpsc::channel();
-        self.filter_receiver = Some(receiver);
+        tab.filter_receiver = Some(receiver);
 
-        let is_filtering = self.is_filtering.clone();
+        let is_filtering = tab.is_filtering.clone();
 
         // Spawn thread
         #[cfg(not(target_arch = "wasm32"))]
@@ -2887,18 +2865,21 @@ impl eframe::App for FastCsvApp {
             );
         }
 
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
         // Check for async filtering results
-        if let Some(receiver) = &self.filter_receiver {
+        if let Some(receiver) = &tab.filter_receiver {
             match receiver.try_recv() {
                 Ok((indices, filters, sort_col, sort_dir, duration)) => {
-                    self.filtered_indices = Some(indices);
-                    self.applied_filters = filters;
-                    self.applied_sort_column = sort_col;
-                    self.applied_sort_direction = sort_dir;
-                    self.filter_duration = Some(duration);
-                    self.filter_receiver = None; // Done receiving
-                    self.is_filtering.store(false, Ordering::Relaxed);
-                    self.row_cache.clear(); // Clear cache for new view
+                    tab.filtered_indices = Some(indices);
+                    tab.applied_filters = filters;
+                    tab.applied_sort_column = sort_col;
+                    tab.applied_sort_direction = sort_dir;
+                    tab.filter_duration = Some(duration);
+                    tab.filter_receiver = None; // Done receiving
+                    tab.is_filtering.store(false, Ordering::Relaxed);
+                    tab.row_cache.clear(); // Clear cache for new view
                     ctx.request_repaint(); // Trigger update to show results
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -2907,8 +2888,8 @@ impl eframe::App for FastCsvApp {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     // Thread panicked or disconnected
-                    self.filter_receiver = None;
-                    self.is_filtering.store(false, Ordering::Relaxed);
+                    tab.filter_receiver = None;
+                    tab.is_filtering.store(false, Ordering::Relaxed);
                     ctx.request_repaint();
                 }
             }
@@ -2918,19 +2899,19 @@ impl eframe::App for FastCsvApp {
         ctx.input(|i| {
             // Cmd/Ctrl+F to toggle search
             if i.modifiers.command && i.key_pressed(Key::F) {
-                self.search.visible = !self.search.visible;
-                if self.search.visible {
+                tab.search.visible = !tab.search.visible;
+                if tab.search.visible {
                     // Request focus on the search input and select all text
-                    self.search.focus_input = true;
+                    tab.search.focus_input = true;
                 }
                 // Note: We don't clear the query when closing - it persists for convenience
             }
             // Escape to close search (keeps query text for convenience)
-            if i.key_pressed(Key::Escape) && self.search.visible {
-                self.search.cancel_flag.store(true, Ordering::SeqCst);
-                self.search.visible = false;
+            if i.key_pressed(Key::Escape) && tab.search.visible {
+                tab.search.cancel_flag.store(true, Ordering::SeqCst);
+                tab.search.visible = false;
                 // Reset history navigation
-                self.search.history_index = None;
+                tab.search.history_index = None;
             }
             // F3 or Cmd+G for next match
             if i.key_pressed(Key::F3) || (i.modifiers.command && i.key_pressed(Key::G)) {
@@ -2942,21 +2923,21 @@ impl eframe::App for FastCsvApp {
             }
             // Cmd+L to open Go to Row dialog
             if i.modifiers.command && i.key_pressed(Key::L) {
-                self.go_to_row.open = true;
-                self.go_to_row.focus_input = true;
-                self.go_to_row.input.clear();
+                tab.go_to_row.open = true;
+                tab.go_to_row.focus_input = true;
+                tab.go_to_row.input.clear();
             }
             // Cmd+Shift+C to open Column Manager
             if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::C) {
-                self.column_state.manager_open = true;
+                tab.column_state.manager_open = true;
             }
             // Cmd+Z for undo column actions
             if i.modifiers.command && i.key_pressed(Key::Z) && !i.modifiers.shift {
-                self.column_state.undo();
+                tab.column_state.undo();
             }
             // Cmd+Shift+Z for redo column actions
             if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::Z) {
-                self.column_state.redo();
+                tab.column_state.redo();
             }
         });
 
@@ -3170,7 +3151,9 @@ impl eframe::App for FastCsvApp {
 
         // Central panel with table
         egui::CentralPanel::default().show(ctx, |ui| {
-            let state = self.state.read();
+            self.ensure_tabs();
+            let tab = self.active_tab();
+            let state = tab.state.read();
             let load_state = state.load_state;
             drop(state);
 
