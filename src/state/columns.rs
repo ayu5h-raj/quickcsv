@@ -175,6 +175,7 @@ impl ColumnState {
     }
 
     /// Reset column order and visibility
+    #[allow(dead_code)]
     pub fn reset_columns(&mut self) {
         self.show_all_columns();
         self.reset_column_order();

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 /// Search execution state
 #[derive(Clone, Copy, PartialEq, Default)]
+#[allow(dead_code)]
 pub enum SearchStatus {
     #[default]
     Idle,
@@ -81,6 +82,7 @@ pub struct SearchState {
 
 impl SearchState {
     /// Clear search state (but keep history)
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.visible = false;
         self.query.clear();

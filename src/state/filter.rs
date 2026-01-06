@@ -158,6 +158,7 @@ impl FilterState {
     }
 
     /// Clear all filters
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.filters.clear();
         self.active_popup = None;
