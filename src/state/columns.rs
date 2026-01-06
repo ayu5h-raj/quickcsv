@@ -54,18 +54,6 @@ impl ColumnState {
         }
     }
 
-    /// Get the original column index for a display index
-    pub fn get_original_index(&self, display_idx: usize) -> Option<usize> {
-        self.column_order.get(display_idx).copied()
-    }
-
-    /// Get the display index for an original column index
-    pub fn get_display_index(&self, original_idx: usize) -> Option<usize> {
-        self.column_order
-            .iter()
-            .position(|&idx| idx == original_idx)
-    }
-
     /// Get visible columns in display order
     pub fn get_visible_columns(&self) -> Vec<usize> {
         self.column_order

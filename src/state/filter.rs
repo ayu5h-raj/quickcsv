@@ -131,11 +131,6 @@ impl FilterState {
         self.filters.remove(&column_idx);
     }
 
-    /// Clear all filters
-    pub fn clear_all_filters(&mut self) {
-        self.filters.clear();
-    }
-
     /// Check if a row matches all active filters
     /// `row_data` is indexed by original column index
     pub fn row_matches(&self, row_data: &[String]) -> bool {

@@ -14,7 +14,7 @@ use eframe::egui::{self, Color32, Key};
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 // Imports from modules
@@ -70,10 +70,20 @@ struct FastCsvApp {
     column_state: ColumnState,
     /// Filter state for column filtering
     filter_state: FilterState,
-    /// Cached filtered row indices (empty = no filter active)
-    filtered_indices: Vec<usize>,
+    /// Cached filtered row indices (None = no filter, Some = indices that pass filter)
+    filtered_indices: Option<Vec<usize>>,
     /// Total row count (before filtering) for status bar
     total_row_count: usize,
+    /// Filter version (increments when filter changes, used to trigger recompute)
+    filter_version: u32,
+    /// Last computed filter version (to detect when recompute is needed)
+    last_filter_version: u32,
+    /// Track previous sorting state to detect completion
+    was_sorting: bool,
+    /// Channel to receive filtered indices from background thread
+    filter_receiver: Option<mpsc::Receiver<Vec<usize>>>,
+    /// Whether filtering is currently in progress
+    is_filtering: Arc<AtomicBool>,
 }
 
 impl Default for FastCsvApp {
@@ -94,8 +104,13 @@ impl Default for FastCsvApp {
             update_state: UpdateState::default(),
             column_state: ColumnState::default(),
             filter_state: FilterState::default(),
-            filtered_indices: Vec::new(),
+            filtered_indices: None,
             total_row_count: 0,
+            filter_version: 0,
+            last_filter_version: 0,
+            was_sorting: false,
+            filter_receiver: None,
+            is_filtering: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -166,6 +181,99 @@ impl FastCsvApp {
                 state_guard.error_message = Some(e);
                 ctx.request_repaint();
             }
+        });
+    }
+
+    /// Increment filter version to trigger recompute
+    fn mark_filter_changed(&mut self) {
+        self.filter_version = self.filter_version.wrapping_add(1);
+        // Don't clear indices/cache here to avoid flashing content.
+        // They will be updated when async task completes.
+    }
+
+    /// Start async filtering task
+    fn start_async_filtering(&mut self) {
+        // If no filters are active, clear filtered indices immediately
+        if !self.filter_state.has_active_filters() {
+            self.filtered_indices = None;
+            self.last_filter_version = self.filter_version;
+            return;
+        }
+
+        // Check if we are already filtering
+        if self.is_filtering.load(Ordering::Relaxed) {
+            // If already filtering, maybe we should cancel previous?
+            // For now, simple implementation: just start new one, late comer wins visually
+            // but cleaner would be cancellation.
+        }
+
+        self.is_filtering.store(true, Ordering::Relaxed);
+        self.last_filter_version = self.filter_version;
+
+        // Clone state for thread
+        let state = self.state.clone();
+        let filter_state = self.filter_state.clone();
+
+        // Capture sort state for consistent ordering
+        let sorted_indices = {
+            let guard = self.sort_state.sorted_indices.read();
+            if self.sort_state.direction != SortDirection::None && !guard.is_empty() {
+                Some(guard.clone())
+            } else {
+                None
+            }
+        };
+
+        // Create channel
+        let (sender, receiver) = mpsc::channel();
+        self.filter_receiver = Some(receiver);
+
+        let is_filtering = self.is_filtering.clone();
+
+        // Spawn thread
+        thread::spawn(move || {
+            let total_rows = {
+                let state_guard = state.read();
+                match &state_guard.csv {
+                    Some(csv) => csv.indexed_row_count(),
+                    None => {
+                        is_filtering.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            };
+
+            let mut indices = Vec::new();
+            {
+                let state_guard = state.read();
+                if let Some(csv) = &state_guard.csv {
+                    if let Some(sorted) = sorted_indices {
+                        // Iterate in sorted order
+                        for &row_idx in sorted.iter() {
+                            if row_idx < total_rows {
+                                if let Some(fields) = csv.parse_row(row_idx) {
+                                    if filter_state.row_matches(&fields) {
+                                        indices.push(row_idx);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Iterate in natural order
+                        for row_idx in 0..total_rows {
+                            if let Some(fields) = csv.parse_row(row_idx) {
+                                if filter_state.row_matches(&fields) {
+                                    indices.push(row_idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Send result
+            let _ = sender.send(indices);
+            is_filtering.store(false, Ordering::Relaxed);
         });
     }
 
@@ -712,6 +820,28 @@ impl FastCsvApp {
             }
         };
 
+        // Store total row count for status bar
+        self.total_row_count = total_rows;
+
+        // Check if sorting just finished
+        let is_sorting = self.sort_state.is_sorting.load(Ordering::Relaxed);
+        if self.was_sorting && !is_sorting {
+            // Sorting finished, need to recompute filtered indices in sorted order
+            self.mark_filter_changed();
+        }
+        self.was_sorting = is_sorting;
+
+        // Recompute filtered indices if filter changed
+        if self.filter_version != self.last_filter_version {
+            self.start_async_filtering();
+        }
+
+        // Determine effective row count (filtered or total)
+        let display_rows = match &self.filtered_indices {
+            Some(indices) => indices.len(),
+            None => total_rows,
+        };
+
         // Initialize column state if needed
         self.column_state.init_column_order(num_columns);
 
@@ -971,11 +1101,15 @@ impl FastCsvApp {
                         }
                     })
                     .body(|body| {
-                        body.rows(ROW_HEIGHT, total_rows, |mut row| {
+                        body.rows(ROW_HEIGHT, display_rows, |mut row| {
                             let display_idx = row.index();
 
-                            // Map display index to actual row index (for sorting)
-                            let actual_row_idx = self.get_actual_row_index(display_idx);
+                            // Determine actual row index (filtered or sorted or original)
+                            let actual_row_idx = if let Some(indices) = &self.filtered_indices {
+                                *indices.get(display_idx).unwrap_or(&0)
+                            } else {
+                                self.get_actual_row_index(display_idx)
+                            };
 
                             // Get or parse row data (cache by actual row index)
                             let fields = if let Some(cached) = self.row_cache.get(&actual_row_idx) {
@@ -994,19 +1128,6 @@ impl FastCsvApp {
                                 self.row_cache.insert(actual_row_idx, fields.clone());
                                 fields
                             };
-
-                            // Check if row matches active filters
-                            let matches_filter = self.filter_state.row_matches(&fields);
-
-                            // If row doesn't match filter, render empty row
-                            if !matches_filter {
-                                // Render empty cells for filtered-out rows
-                                row.col(|_ui| {}); // Row number column
-                                for _ in &visible_columns {
-                                    row.col(|_ui| {});
-                                }
-                                return;
-                            }
 
                             // Check if this is the current navigation row (for special highlighting)
                             let is_current_nav_row = current_nav_row == Some(actual_row_idx);
@@ -1213,10 +1334,21 @@ impl FastCsvApp {
                 if let Some(csv) = &state.csv {
                     let row_count = csv.indexed_row_count();
                     let is_still_indexing = !state.indexing_complete.load(Ordering::Relaxed);
+                    let is_filtering = self.is_filtering.load(Ordering::Relaxed);
 
                     if is_still_indexing {
                         ui.spinner();
                         ui.label(format!("Rows: {}...", format_number(row_count)));
+                    } else if is_filtering {
+                        ui.spinner();
+                        ui.label(format!("Filtering... (Rows: {})", format_number(row_count)));
+                    } else if let Some(filtered) = &self.filtered_indices {
+                        ui.label(format!(
+                            "Rows: {} (of {})",
+                            format_number(filtered.len()),
+                            format_number(row_count)
+                        ))
+                        .on_hover_text("Number of rows matching active filters");
                     } else {
                         ui.label(format!("Rows: {}", format_number(row_count)));
                     }
@@ -1858,12 +1990,11 @@ impl FastCsvApp {
             let operator = self.filter_state.selected_operator;
             let value = self.filter_state.filter_input.clone();
             self.filter_state.apply_filter(col_idx, operator, value);
-            // Clear row cache when filter changes
-            self.row_cache.clear();
+            self.mark_filter_changed();
         } else if should_clear {
             self.filter_state.clear_filter(col_idx);
             self.filter_state.close_popup();
-            self.row_cache.clear();
+            self.mark_filter_changed();
         } else if should_close {
             self.filter_state.close_popup();
         }
@@ -2091,6 +2222,29 @@ impl eframe::App for FastCsvApp {
                 Arc::clone(&self.update_state.update_available),
                 ctx.clone(),
             );
+        }
+
+        // Check for async filtering results
+        if let Some(receiver) = &self.filter_receiver {
+            match receiver.try_recv() {
+                Ok(indices) => {
+                    self.filtered_indices = Some(indices);
+                    self.filter_receiver = None; // Done receiving
+                    self.is_filtering.store(false, Ordering::Relaxed);
+                    self.row_cache.clear(); // Clear cache for new view
+                    ctx.request_repaint(); // Trigger update to show results
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still waiting - keep spinner spinning
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Thread panicked or disconnected
+                    self.filter_receiver = None;
+                    self.is_filtering.store(false, Ordering::Relaxed);
+                    ctx.request_repaint();
+                }
+            }
         }
 
         // Handle keyboard shortcuts
