@@ -1267,10 +1267,21 @@ impl FastCsvApp {
     /// Render the search bar
     fn render_search_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.ensure_tabs();
-        let tab = self.active_tab_mut();
+        let tab_idx = self.active_tab_index;
 
-        // Read search results state
-        let (status, total_matches, nav_row_count, rows_searched, total_rows, nav_limit_reached) = {
+        // Read search results state and query without holding borrow
+        let (
+            status,
+            total_matches,
+            nav_row_count,
+            rows_searched,
+            total_rows,
+            nav_limit_reached,
+            search_query,
+            current_index,
+            active_query,
+        ) = {
+            let tab = &self.tabs[tab_idx];
             let results = tab.search.results.read();
             (
                 results.status,
@@ -1279,11 +1290,34 @@ impl FastCsvApp {
                 results.rows_searched,
                 results.total_rows,
                 results.nav_limit_reached,
+                tab.search.query.clone(),
+                tab.search.current_index,
+                tab.search.active_query.clone(),
             )
         };
 
+        // Access tab inside closure using tab_idx
+        let mut query_changed = false;
+        let mut new_query = search_query.clone();
+        let mut should_focus = false;
+        let mut history_nav: Option<(bool, bool)> = None; // (up, down)
+        let mut should_search = false;
+        let mut should_cancel = false;
+        let mut should_close = false;
+        let mut nav_prev = false;
+        let mut nav_next = false;
+
         ui.horizontal(|ui| {
             ui.label("🔍");
+
+            // Get mutable access to tab inside closure
+            let tab = &mut self.tabs[tab_idx];
+
+            // Auto-focus when search bar opens
+            if tab.search.focus_input {
+                should_focus = true;
+                tab.search.focus_input = false;
+            }
 
             // Search input field
             let response = ui.add(
@@ -1292,10 +1326,8 @@ impl FastCsvApp {
                     .desired_width(250.0),
             );
 
-            // Auto-focus when search bar opens
-            if tab.search.focus_input {
+            if should_focus {
                 response.request_focus();
-                tab.search.focus_input = false;
             }
 
             // Handle up/down arrow for history navigation (only when focused)
@@ -1350,35 +1382,22 @@ impl FastCsvApp {
                 .clicked();
 
             // Cancel button during search
-            let should_cancel = is_searching && ui.button("Cancel").clicked();
+            should_cancel = is_searching && ui.button("Cancel").clicked();
 
-            // Drop tab borrow before calling execute_search
-            if should_search_enter || should_search_button {
-                drop(tab);
-                self.execute_search(ctx);
-                // Request focus back so user can edit query
-                response.request_focus();
-            } else if should_cancel {
-                tab.search.cancel_flag.store(true, Ordering::SeqCst);
-            }
+            // Collect search action
+            should_search = should_search_enter || should_search_button;
 
             ui.separator();
 
             // Navigation buttons (navigate through rows with matches)
             let has_nav_rows = nav_row_count > 0;
 
-            if ui
+            nav_prev = ui
                 .add_enabled(has_nav_rows && !is_searching, egui::Button::new("◀"))
-                .clicked()
-            {
-                self.prev_match();
-            }
-            if ui
+                .clicked();
+            nav_next = ui
                 .add_enabled(has_nav_rows && !is_searching, egui::Button::new("▶"))
-                .clicked()
-            {
-                self.next_match();
-            }
+                .clicked();
 
             // Status display
             match status {
@@ -1398,15 +1417,21 @@ impl FastCsvApp {
                 SearchStatus::Complete | SearchStatus::Cancelled => {
                     if total_matches > 0 {
                         // Ensure current_index is valid
-                        if tab.search.current_index >= nav_row_count && nav_row_count > 0 {
+                        if current_index >= nav_row_count && nav_row_count > 0 {
                             tab.search.current_index = 0;
                         }
                         // Show total matches and navigation position
                         ui.label(format!("{} matches", format_number(total_matches)));
                         if has_nav_rows {
+                            let display_index =
+                                if current_index >= nav_row_count && nav_row_count > 0 {
+                                    0
+                                } else {
+                                    current_index
+                                };
                             ui.label(format!(
                                 "(row {} of {}{})",
-                                tab.search.current_index + 1,
+                                display_index + 1,
                                 format_number(nav_row_count),
                                 if nav_limit_reached { "+" } else { "" }
                             ));
@@ -1414,7 +1439,7 @@ impl FastCsvApp {
                         if status == SearchStatus::Cancelled {
                             ui.label("(partial)");
                         }
-                    } else if !tab.search.active_query.is_empty() {
+                    } else if !active_query.is_empty() {
                         ui.label("No matches");
                     }
                 }
@@ -1423,24 +1448,39 @@ impl FastCsvApp {
                 }
             }
 
-            let should_close_search = {
+            should_close = {
                 let mut clicked = false;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     clicked = ui.button(egui_phosphor::regular::X).clicked();
                 });
                 clicked
             };
-            if should_close_search {
-                tab.search.cancel_flag.store(true, Ordering::SeqCst);
-                tab.search.visible = false;
-                tab.search.query.clear();
-                tab.search.active_query.clear();
-                let mut results = tab.search.results.write();
-                results.navigation_rows.clear();
-                results.total_match_count = 0;
-                results.status = SearchStatus::Idle;
-            }
         });
+
+        // Handle actions after UI closure (to avoid borrow conflicts)
+        if should_search {
+            self.execute_search(ctx);
+        } else if should_cancel {
+            let tab = &mut self.tabs[tab_idx];
+            tab.search.cancel_flag.store(true, Ordering::SeqCst);
+        } else if should_close {
+            let tab = &mut self.tabs[tab_idx];
+            tab.search.cancel_flag.store(true, Ordering::SeqCst);
+            tab.search.visible = false;
+            tab.search.query.clear();
+            tab.search.active_query.clear();
+            let mut results = tab.search.results.write();
+            results.navigation_rows.clear();
+            results.total_match_count = 0;
+            results.status = SearchStatus::Idle;
+        }
+
+        if nav_prev {
+            self.prev_match();
+        }
+        if nav_next {
+            self.next_match();
+        }
 
         // Request repaint during search to update progress
         if status == SearchStatus::Searching {
@@ -1451,13 +1491,14 @@ impl FastCsvApp {
     /// Render the virtualized table using egui_extras::TableBuilder
     fn render_table(&mut self, ui: &mut egui::Ui) {
         self.ensure_tabs();
-        // Get tab index first to avoid borrow conflicts
+        // Get tab index - render_table_with_tab will access it directly
         let tab_idx = self.active_tab_index;
-        // Call render_table_with_tab with direct mutable reference
-        self.render_table_with_tab(ui, &mut self.tabs[tab_idx]);
+        self.render_table_with_tab(ui, tab_idx);
     }
 
-    fn render_table_with_tab(&mut self, ui: &mut egui::Ui, tab: &mut TabState) {
+    fn render_table_with_tab(&mut self, ui: &mut egui::Ui, tab_idx: usize) {
+        // Get mutable reference to the tab
+        let tab = &mut self.tabs[tab_idx];
         use egui_extras::{Column, TableBuilder};
 
         // Extract data from state first, then drop the lock
@@ -1477,45 +1518,108 @@ impl FastCsvApp {
         // Store total row count for status bar
         tab.total_row_count = total_rows;
 
-        // Check if sorting just finished
-        let is_sorting = tab.sort_state.is_sorting.load(Ordering::Relaxed);
-        if tab.was_sorting && !is_sorting {
+        // Check if sorting just finished and filter state
+        let (is_sorting, was_sorting, filter_changed) = {
+            let tab = &self.tabs[tab_idx];
+            (
+                tab.sort_state.is_sorting.load(Ordering::Relaxed),
+                tab.was_sorting,
+                tab.filter_version != tab.last_filter_version,
+            )
+        };
+
+        // Update was_sorting and handle filter changes
+        {
+            let tab = &mut self.tabs[tab_idx];
+            tab.was_sorting = is_sorting;
+        }
+
+        if was_sorting && !is_sorting {
             // Sorting finished, need to recompute filtered indices in sorted order
             self.mark_filter_changed();
         }
-        tab.was_sorting = is_sorting;
 
         // Recompute filtered indices if filter changed
-        if tab.filter_version != tab.last_filter_version {
+        if filter_changed {
             self.start_async_filtering(ui.ctx());
         }
 
-        // Determine effective row count (filtered or total)
-        let display_rows = match &tab.filtered_indices {
-            Some(indices) => indices.len(),
-            None => total_rows,
+        // Extract data we need before the closure
+        let (
+            display_rows,
+            visible_columns,
+            column_widths,
+            scroll_to_row,
+            search_query,
+            current_nav_row,
+            current_sort_col,
+            current_sort_dir,
+            is_sorting,
+            sort_progress,
+        ) = {
+            let tab = &mut self.tabs[tab_idx];
+
+            // Determine effective row count (filtered or total)
+            let display_rows = match &tab.filtered_indices {
+                Some(indices) => indices.len(),
+                None => total_rows,
+            };
+
+            // Initialize column state if needed
+            tab.column_state.init_column_order(num_columns);
+
+            // Get visible columns in display order
+            let visible_columns = tab.column_state.get_visible_columns().clone();
+            let num_visible = visible_columns.len();
+
+            // Ensure we have column widths for visible columns only
+            if tab.column_widths.len() != num_visible {
+                tab.column_widths = vec![DEFAULT_COLUMN_WIDTH; num_visible];
+            }
+
+            // Handle scroll to row request (from search or go-to-row dialog)
+            let scroll_to_row = tab
+                .search
+                .scroll_to_row
+                .take()
+                .or_else(|| tab.go_to_row.scroll_to_row.take());
+
+            // Get search query and current navigation row for highlighting
+            let (search_query, current_nav_row) = {
+                let results = tab.search.results.read();
+                let nav_row = if !results.navigation_rows.is_empty()
+                    && tab.search.current_index < results.navigation_rows.len()
+                {
+                    Some(results.navigation_rows[tab.search.current_index])
+                } else {
+                    None
+                };
+                (tab.search.active_query.clone(), nav_row)
+            };
+
+            let current_sort_col = tab.sort_state.column;
+            let current_sort_dir = tab.sort_state.direction;
+            let is_sorting = tab.sort_state.is_sorting.load(Ordering::Relaxed);
+            let sort_progress = tab.sort_state.progress.load(Ordering::Relaxed);
+
+            (
+                display_rows,
+                visible_columns,
+                tab.column_widths.clone(),
+                scroll_to_row,
+                search_query,
+                current_nav_row,
+                current_sort_col,
+                current_sort_dir,
+                is_sorting,
+                sort_progress,
+            )
         };
 
-        // Initialize column state if needed
-        tab.column_state.init_column_order(num_columns);
-
-        // Get visible columns in display order
-        let visible_columns = tab.column_state.get_visible_columns();
-        let num_visible = visible_columns.len();
-
-        // Ensure we have column widths for visible columns only
-        if tab.column_widths.len() != num_visible {
-            tab.column_widths = vec![DEFAULT_COLUMN_WIDTH; num_visible];
-        }
-
-        let _text_color = ui.style().visuals.text_color();
-
-        // Handle scroll to row request (from search or go-to-row dialog)
-        let scroll_to_row = tab
-            .search
-            .scroll_to_row
-            .take()
-            .or_else(|| tab.go_to_row.scroll_to_row.take());
+        // Track actions that need to happen after the closure
+        let mut clicked_column: Option<usize> = None;
+        let mut row_to_open_detail: Option<usize> = None;
+        let mut drop_target_idx: Option<usize> = None;
 
         // Wrap table in horizontal scroll area for wide tables
         egui::ScrollArea::horizontal()
@@ -1538,35 +1642,12 @@ impl FastCsvApp {
                 table = table.column(Column::exact(60.0).clip(true));
 
                 // Add visible data columns in display order - use clip(true) to prevent overflow
-                for col_width in &tab.column_widths {
+                for col_width in &column_widths {
                     table = table.column(Column::initial(*col_width).resizable(true).clip(true));
                 }
 
-                // Get search query and current navigation row for highlighting
-                // NOTE: We do NOT clone any large data structures - highlighting is done on-the-fly
-                let (search_query, current_nav_row) = {
-                    let results = tab.search.results.read();
-                    let nav_row = if !results.navigation_rows.is_empty()
-                        && tab.search.current_index < results.navigation_rows.len()
-                    {
-                        Some(results.navigation_rows[tab.search.current_index])
-                    } else {
-                        None
-                    };
-                    (tab.search.active_query.clone(), nav_row)
-                };
-
-                // Track which column header was clicked for sorting
-                let mut clicked_column: Option<usize> = None;
-                // Track which row's detail popup should be opened
-                let mut row_to_open_detail: Option<usize> = None;
-                // Track drop target for column reordering
-                let mut drop_target_idx: Option<usize> = None;
-
-                let current_sort_col = tab.sort_state.column;
-                let current_sort_dir = tab.sort_state.direction;
-                let is_sorting = tab.sort_state.is_sorting.load(Ordering::Relaxed);
-                let sort_progress = tab.sort_state.progress.load(Ordering::Relaxed);
+                // Access tab inside closure
+                let tab = &mut self.tabs[tab_idx];
 
                 table
                     .header(ROW_HEIGHT, |mut header| {
@@ -1937,30 +2018,34 @@ impl FastCsvApp {
                         });
                     });
 
-                // Handle column header click for sorting (after table is built)
-                if let Some(col_idx) = clicked_column {
-                    self.sort_by_column(col_idx, ui.ctx());
-                }
-
-                // Handle column drop for reordering
-                // Check if pointer was released while we have a dragged column
-                let pointer_released = ui.input(|i| i.pointer.any_released());
-                if pointer_released {
-                    if let Some(dragged) = tab.column_state.dragged_column {
-                        if let Some(target) = drop_target_idx {
-                            if dragged != target {
-                                tab.column_state.reorder_visible_columns(dragged, target);
-                            }
-                        }
-                        tab.column_state.dragged_column = None;
-                    }
-                }
-
-                // Handle row number double-click for row detail popup
-                if let Some(row_idx) = row_to_open_detail {
-                    self.open_row_detail(row_idx);
-                }
             }); // End of horizontal scroll area
+
+        // Handle actions after closure (to avoid borrow conflicts)
+        // Handle column header click for sorting
+        if let Some(col_idx) = clicked_column {
+            self.sort_by_column(col_idx, ui.ctx());
+        }
+
+        // Handle column drop for reordering
+        {
+            let tab = &mut self.tabs[tab_idx];
+            let pointer_released = ui.input(|i| i.pointer.any_released());
+            if pointer_released {
+                if let Some(dragged) = tab.column_state.dragged_column {
+                    if let Some(target) = drop_target_idx {
+                        if dragged != target {
+                            tab.column_state.reorder_visible_columns(dragged, target);
+                        }
+                    }
+                    tab.column_state.dragged_column = None;
+                }
+            }
+        }
+
+        // Handle row number double-click for row detail popup
+        if let Some(row_idx) = row_to_open_detail {
+            self.open_row_detail(row_idx);
+        }
 
         // Prune old cache entries (keep last 2000 rows in cache)
         if tab.row_cache.len() > 2000 {
@@ -2916,31 +3001,34 @@ impl eframe::App for FastCsvApp {
         }
 
         self.ensure_tabs();
-        let tab = self.active_tab_mut();
+        let tab_idx = self.active_tab_index;
 
         // Check for async filtering results
-        if let Some(receiver) = &tab.filter_receiver {
-            match receiver.try_recv() {
-                Ok((indices, filters, sort_col, sort_dir, duration)) => {
-                    tab.filtered_indices = Some(indices);
-                    tab.applied_filters = filters;
-                    tab.applied_sort_column = sort_col;
-                    tab.applied_sort_direction = sort_dir;
-                    tab.filter_duration = Some(duration);
-                    tab.filter_receiver = None; // Done receiving
-                    tab.is_filtering.store(false, Ordering::Relaxed);
-                    tab.row_cache.clear(); // Clear cache for new view
-                    ctx.request_repaint(); // Trigger update to show results
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    // Still waiting - keep spinner spinning
-                    ctx.request_repaint();
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    // Thread panicked or disconnected
-                    tab.filter_receiver = None;
-                    tab.is_filtering.store(false, Ordering::Relaxed);
-                    ctx.request_repaint();
+        {
+            let tab = &mut self.tabs[tab_idx];
+            if let Some(receiver) = &tab.filter_receiver {
+                match receiver.try_recv() {
+                    Ok((indices, filters, sort_col, sort_dir, duration)) => {
+                        tab.filtered_indices = Some(indices);
+                        tab.applied_filters = filters;
+                        tab.applied_sort_column = sort_col;
+                        tab.applied_sort_direction = sort_dir;
+                        tab.filter_duration = Some(duration);
+                        tab.filter_receiver = None; // Done receiving
+                        tab.is_filtering.store(false, Ordering::Relaxed);
+                        tab.row_cache.clear(); // Clear cache for new view
+                        ctx.request_repaint(); // Trigger update to show results
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        // Still waiting - keep spinner spinning
+                        ctx.request_repaint();
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // Thread panicked or disconnected
+                        tab.filter_receiver = None;
+                        tab.is_filtering.store(false, Ordering::Relaxed);
+                        ctx.request_repaint();
+                    }
                 }
             }
         }
@@ -2949,7 +3037,7 @@ impl eframe::App for FastCsvApp {
         // Collect actions first, then apply them after dropping tab borrow
         let mut actions = Vec::new();
         {
-            let tab = &mut self.tabs[self.active_tab_index];
+            let tab = &mut self.tabs[tab_idx];
             ctx.input(|i| {
                 // Cmd/Ctrl+F to toggle search
                 if i.modifiers.command && i.key_pressed(Key::F) {
@@ -3365,12 +3453,16 @@ impl eframe::App for FastCsvApp {
                     });
                 }
                 LoadState::Indexing => {
+                    // Get row count without holding tab borrow
+                    let rows = {
+                        let tab = &self.tabs[tab_idx];
+                        let state = tab.state.read();
+                        state.rows_indexed.load(Ordering::Relaxed)
+                    };
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
                             ui.spinner();
                             ui.add_space(10.0);
-                            let state = tab.state.read();
-                            let rows = state.rows_indexed.load(Ordering::Relaxed);
                             ui.label(format!(
                                 "Indexing file... {} rows found",
                                 format_number(rows)
@@ -3384,19 +3476,23 @@ impl eframe::App for FastCsvApp {
                     self.render_table(ui);
                 }
                 LoadState::Error => {
+                    // Get error message without holding tab borrow
+                    let error_msg = {
+                        let tab = &self.tabs[tab_idx];
+                        let state = tab.state.read();
+                        state.error_message.clone()
+                    };
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
-                            let state = tab.state.read();
                             ui.colored_label(
                                 egui::Color32::RED,
                                 format!(
                                     "Error: {}",
-                                    state.error_message.as_deref().unwrap_or("Unknown")
+                                    error_msg.as_deref().unwrap_or("Unknown")
                                 ),
                             );
                             ui.add_space(20.0);
                             if ui.button("Try Again").clicked() {
-                                drop(state);
                                 self.open_file(ctx);
                             }
                         });
