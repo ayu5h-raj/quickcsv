@@ -26,18 +26,27 @@ QuickCSV is a high-performance CSV viewer for macOS built with Rust and egui.
 - Run `cargo fmt` before committing
 - Run `cargo clippy -- -D warnings` to check for warnings
 - Use inline format args: `format!("{value}")` not `format!("{}", value)`
+- **ALWAYS use Phosphor icons** - Never use emoji or text-only buttons. Use `egui_phosphor::regular::ICON_NAME` for all icons
+- **NEVER work directly on main branch** - Always create a feature/fix branch first
+- **Only push to main** when bumping version and creating a release tag
 
 ## Git Workflow
 
-1. Create feature branch: `feature/feature-name` or `fix/bug-name`
+**CRITICAL: Always work on a branch, never on main directly**
+
+1. **Always create a branch first**: `git checkout -b feature/feature-name` or `fix/bug-name`
 2. Make changes and commit with conventional commits:
    - `feat:` for new features
    - `fix:` for bug fixes
    - `perf:` for performance improvements
    - `docs:` for documentation
    - `ci:` for CI/CD changes
-3. Push branch and create PR
-4. After merge, create tag for release: `git tag v0.X.X && git push origin v0.X.X`
+3. Push branch and create PR: `git push -u origin feature/feature-name`
+4. After PR is merged to main, create tag for release: `git tag v0.X.X && git push origin v0.X.X`
+5. **Only push directly to main** when:
+   - Bumping version in Cargo.toml
+   - Creating release tags
+   - Hotfixes (create fix branch first, then merge)
 
 ## Release Process
 
@@ -83,14 +92,25 @@ QuickCSV is a high-performance CSV viewer for macOS built with Rust and egui.
 - Use `Cow<str>` to avoid unnecessary allocations
 - Cache parsed rows to avoid repeated parsing
 
+## UI Guidelines
+
+- **Icons**: Always use Phosphor icons from `egui_phosphor::regular::`
+  - Examples: `FOLDER_OPEN`, `CLOCK`, `FILE_TEXT`, `X`, `SEARCH`, `FILTER`, etc.
+  - Format: `format!("{} Button Text", egui_phosphor::regular::ICON_NAME)`
+  - Never use emoji (📂, 📄, ✕) - always use Phosphor icons
+- **Consistency**: Use the same icon style throughout the app
+- **Hover states**: Add `.on_hover_text()` for better UX
+- **Visual feedback**: Use proper button states (hovered, clicked, disabled)
+
 ## Common Tasks
 
 ### Adding a new feature
-1. Create branch
+1. **Create branch first**: `git checkout -b feature/feature-name`
 2. Implement in `src/main.rs`
-3. Test with large CSV files
-4. Run `cargo fmt && cargo clippy -- -D warnings`
-5. Commit, push, create PR
+3. Use Phosphor icons for all UI elements
+4. Test with large CSV files
+5. Run `cargo fmt && cargo clippy -- -D warnings`
+6. Commit, push branch, create PR
 
 ### Making a release
 1. Bump version in Cargo.toml
