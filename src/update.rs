@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::thread;
 
 /// Current version from Cargo.toml
+#[allow(dead_code)]
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Update checker state
@@ -76,6 +77,7 @@ pub fn check_for_updates(
 }
 
 #[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
 pub fn check_for_updates(
     _latest_version: Arc<RwLock<Option<String>>>,
     _update_available: Arc<AtomicBool>,
@@ -85,6 +87,7 @@ pub fn check_for_updates(
 }
 
 /// Compare version strings (simple semver comparison)
+#[allow(dead_code)]
 pub fn is_newer_version(latest: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
 

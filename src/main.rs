@@ -9,11 +9,10 @@ mod state;
 mod update;
 mod utils;
 
-#[cfg(target_arch = "wasm32")]
-use ::csv as csv_crate;
 use eframe::egui::{self, Color32, Key};
 
 use parking_lot::RwLock;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
