@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
 
 /// State for a single tab (one CSV file)

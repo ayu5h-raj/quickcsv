@@ -719,15 +719,18 @@ impl FastCsvApp {
     /// Note: Sorting uses the original column index, so it works on the actual data
     /// regardless of whether the column is currently visible or hidden.
     fn sort_by_column(&mut self, col_idx: usize, ctx: &egui::Context) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
         // If already sorting, ignore click
-        if self.sort_state.is_sorting.load(Ordering::Relaxed) {
+        if tab.sort_state.is_sorting.load(Ordering::Relaxed) {
             return;
         }
 
         // Determine new sort direction
-        let new_direction = if self.sort_state.column == Some(col_idx) {
+        let new_direction = if tab.sort_state.column == Some(col_idx) {
             // Same column - cycle through directions
-            match self.sort_state.direction {
+            match tab.sort_state.direction {
                 SortDirection::None => SortDirection::Ascending,
                 SortDirection::Ascending => SortDirection::Descending,
                 SortDirection::Descending => SortDirection::None,
@@ -739,35 +742,35 @@ impl FastCsvApp {
 
         // If direction is None, clear sorting
         if new_direction == SortDirection::None {
-            self.sort_state.cancel_flag.store(true, Ordering::SeqCst);
-            self.sort_state = SortState::default();
-            self.row_cache.clear();
+            tab.sort_state.cancel_flag.store(true, Ordering::SeqCst);
+            tab.sort_state = SortState::default();
+            tab.row_cache.clear();
             return;
         }
 
         // Cancel any previous sort
-        self.sort_state.cancel_flag.store(true, Ordering::SeqCst);
+        tab.sort_state.cancel_flag.store(true, Ordering::SeqCst);
 
         // Update sort state
-        self.sort_state.column = Some(col_idx);
-        self.sort_state.direction = new_direction;
-        self.sort_state.is_sorting.store(true, Ordering::SeqCst);
-        self.sort_state.progress.store(0, Ordering::SeqCst);
-        self.sort_state.cancel_flag = Arc::new(AtomicBool::new(false));
+        tab.sort_state.column = Some(col_idx);
+        tab.sort_state.direction = new_direction;
+        tab.sort_state.is_sorting.store(true, Ordering::SeqCst);
+        tab.sort_state.progress.store(0, Ordering::SeqCst);
+        tab.sort_state.cancel_flag = Arc::new(AtomicBool::new(false));
 
         // Clear sorted indices and row cache
         {
-            let mut indices = self.sort_state.sorted_indices.write();
+            let mut indices = tab.sort_state.sorted_indices.write();
             indices.clear();
         }
-        self.row_cache.clear();
+        tab.row_cache.clear();
 
         // Clone what we need for the background thread
-        let state = Arc::clone(&self.state);
-        let sorted_indices = Arc::clone(&self.sort_state.sorted_indices);
-        let is_sorting = Arc::clone(&self.sort_state.is_sorting);
-        let progress = Arc::clone(&self.sort_state.progress);
-        let cancel_flag = Arc::clone(&self.sort_state.cancel_flag);
+        let state = Arc::clone(&tab.state);
+        let sorted_indices = Arc::clone(&tab.sort_state.sorted_indices);
+        let is_sorting = Arc::clone(&tab.sort_state.is_sorting);
+        let progress = Arc::clone(&tab.sort_state.progress);
+        let cancel_flag = Arc::clone(&tab.sort_state.cancel_flag);
         let ctx = ctx.clone();
 
         // Spawn background sorting thread
@@ -1427,11 +1430,17 @@ impl FastCsvApp {
 
     /// Render the virtualized table using egui_extras::TableBuilder
     fn render_table(&mut self, ui: &mut egui::Ui) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+        self.render_table_with_tab(ui, tab);
+    }
+
+    fn render_table_with_tab(&mut self, ui: &mut egui::Ui, tab: &mut TabState) {
         use egui_extras::{Column, TableBuilder};
 
         // Extract data from state first, then drop the lock
         let (headers, total_rows, num_columns, _is_indexing) = {
-            let state = self.state.read();
+            let state = tab.state.read();
             match &state.csv {
                 Some(csv) => (
                     csv.headers.clone(),
@@ -1444,47 +1453,47 @@ impl FastCsvApp {
         };
 
         // Store total row count for status bar
-        self.total_row_count = total_rows;
+        tab.total_row_count = total_rows;
 
         // Check if sorting just finished
-        let is_sorting = self.sort_state.is_sorting.load(Ordering::Relaxed);
-        if self.was_sorting && !is_sorting {
+        let is_sorting = tab.sort_state.is_sorting.load(Ordering::Relaxed);
+        if tab.was_sorting && !is_sorting {
             // Sorting finished, need to recompute filtered indices in sorted order
             self.mark_filter_changed();
         }
-        self.was_sorting = is_sorting;
+        tab.was_sorting = is_sorting;
 
         // Recompute filtered indices if filter changed
-        if self.filter_version != self.last_filter_version {
+        if tab.filter_version != tab.last_filter_version {
             self.start_async_filtering(ui.ctx());
         }
 
         // Determine effective row count (filtered or total)
-        let display_rows = match &self.filtered_indices {
+        let display_rows = match &tab.filtered_indices {
             Some(indices) => indices.len(),
             None => total_rows,
         };
 
         // Initialize column state if needed
-        self.column_state.init_column_order(num_columns);
+        tab.column_state.init_column_order(num_columns);
 
         // Get visible columns in display order
-        let visible_columns = self.column_state.get_visible_columns();
+        let visible_columns = tab.column_state.get_visible_columns();
         let num_visible = visible_columns.len();
 
         // Ensure we have column widths for visible columns only
-        if self.column_widths.len() != num_visible {
-            self.column_widths = vec![DEFAULT_COLUMN_WIDTH; num_visible];
+        if tab.column_widths.len() != num_visible {
+            tab.column_widths = vec![DEFAULT_COLUMN_WIDTH; num_visible];
         }
 
         let _text_color = ui.style().visuals.text_color();
 
         // Handle scroll to row request (from search or go-to-row dialog)
-        let scroll_to_row = self
+        let scroll_to_row = tab
             .search
             .scroll_to_row
             .take()
-            .or_else(|| self.go_to_row.scroll_to_row.take());
+            .or_else(|| tab.go_to_row.scroll_to_row.take());
 
         // Wrap table in horizontal scroll area for wide tables
         egui::ScrollArea::horizontal()
@@ -1507,22 +1516,22 @@ impl FastCsvApp {
                 table = table.column(Column::exact(60.0).clip(true));
 
                 // Add visible data columns in display order - use clip(true) to prevent overflow
-                for col_width in &self.column_widths {
+                for col_width in &tab.column_widths {
                     table = table.column(Column::initial(*col_width).resizable(true).clip(true));
                 }
 
                 // Get search query and current navigation row for highlighting
                 // NOTE: We do NOT clone any large data structures - highlighting is done on-the-fly
                 let (search_query, current_nav_row) = {
-                    let results = self.search.results.read();
+                    let results = tab.search.results.read();
                     let nav_row = if !results.navigation_rows.is_empty()
-                        && self.search.current_index < results.navigation_rows.len()
+                        && tab.search.current_index < results.navigation_rows.len()
                     {
-                        Some(results.navigation_rows[self.search.current_index])
+                        Some(results.navigation_rows[tab.search.current_index])
                     } else {
                         None
                     };
-                    (self.search.active_query.clone(), nav_row)
+                    (tab.search.active_query.clone(), nav_row)
                 };
 
                 // Track which column header was clicked for sorting
@@ -1532,10 +1541,10 @@ impl FastCsvApp {
                 // Track drop target for column reordering
                 let mut drop_target_idx: Option<usize> = None;
 
-                let current_sort_col = self.sort_state.column;
-                let current_sort_dir = self.sort_state.direction;
-                let is_sorting = self.sort_state.is_sorting.load(Ordering::Relaxed);
-                let sort_progress = self.sort_state.progress.load(Ordering::Relaxed);
+                let current_sort_col = tab.sort_state.column;
+                let current_sort_dir = tab.sort_state.direction;
+                let is_sorting = tab.sort_state.is_sorting.load(Ordering::Relaxed);
+                let sort_progress = tab.sort_state.progress.load(Ordering::Relaxed);
 
                 table
                     .header(ROW_HEIGHT, |mut header| {
@@ -1562,12 +1571,12 @@ impl FastCsvApp {
 
                                     // Track drag state
                                     if drag_response.drag_started() {
-                                        self.column_state.dragged_column = Some(display_idx);
+                                        tab.column_state.dragged_column = Some(display_idx);
                                     }
 
                                     // Check drag state
-                                    let is_dragging = self.column_state.dragged_column.is_some();
-                                    let is_being_dragged = self.column_state.dragged_column == Some(display_idx);
+                                    let is_dragging = tab.column_state.dragged_column.is_some();
+                                    let is_being_dragged = tab.column_state.dragged_column == Some(display_idx);
 
                                     // Visual feedback - highlight when dragging or hovered
                                     let handle_color = if is_being_dragged {
@@ -1685,7 +1694,7 @@ impl FastCsvApp {
                                     }
 
                                     // Filter icon button - shows dropdown on click
-                                    let has_filter = self.filter_state.has_filter(original_idx);
+                                    let has_filter = tab.filter_state.has_filter(original_idx);
                                     let filter_icon = if has_filter {
                                         egui_phosphor::regular::FUNNEL_SIMPLE_X
                                     } else {
@@ -1703,10 +1712,10 @@ impl FastCsvApp {
                                         .frame(false)
                                     );
                                     if filter_btn.clicked() {
-                                        if self.filter_state.active_popup == Some(original_idx) {
-                                            self.filter_state.close_popup();
+                                        if tab.filter_state.active_popup == Some(original_idx) {
+                                            tab.filter_state.close_popup();
                                         } else {
-                                            self.filter_state.open_popup(original_idx);
+                                            tab.filter_state.open_popup(original_idx);
                                         }
                                     }
                                     filter_btn.on_hover_text(if has_filter {
@@ -1728,18 +1737,18 @@ impl FastCsvApp {
                             let display_idx = row.index();
 
                             // Determine actual row index (filtered or sorted or original)
-                            let actual_row_idx = if let Some(indices) = &self.filtered_indices {
+                            let actual_row_idx = if let Some(indices) = &tab.filtered_indices {
                                 *indices.get(display_idx).unwrap_or(&0)
                             } else {
                                 self.get_actual_row_index(display_idx)
                             };
 
                             // Get or parse row data (cache by actual row index)
-                            let fields = if let Some(cached) = self.row_cache.get(&actual_row_idx) {
+                            let fields = if let Some(cached) = tab.row_cache.get(&actual_row_idx) {
                                 cached.clone()
                             } else {
                                 // Parse from mmap
-                                let state = self.state.read();
+                                let state = tab.state.read();
                                 let fields = if let Some(csv) = &state.csv {
                                     csv.parse_row(actual_row_idx).unwrap_or_default()
                                 } else {
@@ -1748,7 +1757,7 @@ impl FastCsvApp {
                                 drop(state);
 
                                 // Cache for next render
-                                self.row_cache.insert(actual_row_idx, fields.clone());
+                                tab.row_cache.insert(actual_row_idx, fields.clone());
                                 fields
                             };
 
@@ -1756,7 +1765,7 @@ impl FastCsvApp {
                             let is_current_nav_row = current_nav_row == Some(actual_row_idx);
 
                             // Check if this row is highlighted from "Go to Row"
-                            let is_goto_highlighted = self.go_to_row.highlight_row == Some(actual_row_idx);
+                            let is_goto_highlighted = tab.go_to_row.highlight_row == Some(actual_row_idx);
 
                             // Row number column (1-indexed, shows actual row number)
                             // Double-click to open row detail popup
@@ -1860,7 +1869,7 @@ impl FastCsvApp {
 
                                     // Handle click to clear go-to-row highlight
                                     if response.clicked() {
-                                        self.go_to_row.highlight_row = None;
+                                        tab.go_to_row.highlight_row = None;
                                     }
 
                                     // Handle double-click to open cell viewer (works for any cell)
@@ -1875,15 +1884,15 @@ impl FastCsvApp {
                                         let formatted =
                                             if is_json { format_json(field) } else { None };
 
-                                        self.json_viewer.open = true;
-                                        self.json_viewer.raw_content = field.clone();
-                                        self.json_viewer.formatted_content =
+                                        tab.json_viewer.open = true;
+                                        tab.json_viewer.raw_content = field.clone();
+                                        tab.json_viewer.formatted_content =
                                             formatted.clone().unwrap_or_else(|| field.clone());
-                                        self.json_viewer.is_valid_json =
+                                        tab.json_viewer.is_valid_json =
                                             is_json && formatted.is_some();
-                                        self.json_viewer.row = actual_row_idx;
-                                        self.json_viewer.col = original_idx; // Store original index
-                                        self.json_viewer.column_name = col_name;
+                                        tab.json_viewer.row = actual_row_idx;
+                                        tab.json_viewer.col = original_idx; // Store original index
+                                        tab.json_viewer.column_name = col_name;
                                     }
 
                                     // Show tooltip for truncated cells
@@ -1915,13 +1924,13 @@ impl FastCsvApp {
                 // Check if pointer was released while we have a dragged column
                 let pointer_released = ui.input(|i| i.pointer.any_released());
                 if pointer_released {
-                    if let Some(dragged) = self.column_state.dragged_column {
+                    if let Some(dragged) = tab.column_state.dragged_column {
                         if let Some(target) = drop_target_idx {
                             if dragged != target {
-                                self.column_state.reorder_visible_columns(dragged, target);
+                                tab.column_state.reorder_visible_columns(dragged, target);
                             }
                         }
-                        self.column_state.dragged_column = None;
+                        tab.column_state.dragged_column = None;
                     }
                 }
 
@@ -1932,17 +1941,19 @@ impl FastCsvApp {
             }); // End of horizontal scroll area
 
         // Prune old cache entries (keep last 2000 rows in cache)
-        if self.row_cache.len() > 2000 {
-            let keys: Vec<usize> = self.row_cache.keys().cloned().collect();
-            for key in keys.into_iter().take(self.row_cache.len() - 1000) {
-                self.row_cache.remove(&key);
+        if tab.row_cache.len() > 2000 {
+            let keys: Vec<usize> = tab.row_cache.keys().cloned().collect();
+            for key in keys.into_iter().take(tab.row_cache.len() - 1000) {
+                tab.row_cache.remove(&key);
             }
         }
     }
 
     /// Render the status bar
     fn render_status_bar(&self, ui: &mut egui::Ui) {
-        let state = self.state.read();
+        self.ensure_tabs();
+        let tab = self.active_tab();
+        let state = tab.state.read();
 
         ui.horizontal(|ui| match state.load_state {
             LoadState::Empty => {
@@ -1957,7 +1968,7 @@ impl FastCsvApp {
                 if let Some(csv) = &state.csv {
                     let row_count = csv.indexed_row_count();
                     let is_still_indexing = !state.indexing_complete.load(Ordering::Relaxed);
-                    let is_filtering = self.is_filtering.load(Ordering::Relaxed);
+                    let is_filtering = tab.is_filtering.load(Ordering::Relaxed);
 
                     if is_still_indexing {
                         ui.spinner();
@@ -1965,8 +1976,8 @@ impl FastCsvApp {
                     } else if is_filtering {
                         ui.spinner();
                         ui.label(format!("Filtering... (Rows: {})", format_number(row_count)));
-                    } else if let Some(filtered) = &self.filtered_indices {
-                        let duration_text = if let Some(d) = self.filter_duration {
+                    } else if let Some(filtered) = &tab.filtered_indices {
+                        let duration_text = if let Some(d) = tab.filter_duration {
                             format!(" • {:.2}s", d.as_secs_f64())
                         } else {
                             String::new()
