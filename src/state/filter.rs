@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 /// Filter operators for column filtering
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FilterOperator {
+    #[default]
     Contains,
     Equals,
     StartsWith,
@@ -42,12 +43,6 @@ impl FilterOperator {
             FilterOperator::NotEmpty,
             FilterOperator::Empty,
         ]
-    }
-}
-
-impl Default for FilterOperator {
-    fn default() -> Self {
-        FilterOperator::Contains
     }
 }
 

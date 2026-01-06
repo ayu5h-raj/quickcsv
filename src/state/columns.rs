@@ -16,7 +16,7 @@ pub enum ColumnAction {
 }
 
 /// Column state management
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ColumnState {
     /// Set of hidden column indices (original indices)
     pub hidden_columns: HashSet<usize>,
@@ -31,19 +31,6 @@ pub struct ColumnState {
     pub manager_open: bool,
     /// Column being dragged (visible index)
     pub dragged_column: Option<usize>,
-}
-
-impl Default for ColumnState {
-    fn default() -> Self {
-        Self {
-            hidden_columns: HashSet::new(),
-            column_order: Vec::new(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            manager_open: false,
-            dragged_column: None,
-        }
-    }
 }
 
 impl ColumnState {

@@ -82,6 +82,7 @@ struct FastCsvApp {
     /// Track previous sorting state to detect completion
     was_sorting: bool,
     /// Channel to receive filtered indices from background thread
+    #[allow(clippy::type_complexity)]
     filter_receiver: Option<
         mpsc::Receiver<(
             Vec<usize>,
@@ -1091,7 +1092,7 @@ impl FastCsvApp {
                                     let pointer_pos = ui.ctx().pointer_hover_pos();
                                     let is_drop_target = is_dragging
                                         && !is_being_dragged
-                                        && pointer_pos.map_or(false, |pos| full_header_rect.contains(pos));
+                                        && pointer_pos.is_some_and(|pos| full_header_rect.contains(pos));
 
                                     // Track this column as potential drop target
                                     if is_drop_target {
@@ -1235,7 +1236,7 @@ impl FastCsvApp {
 
                             // Render each visible cell with ON-THE-FLY search highlighting
                             // Iterate over visible columns in display order
-                            for (_display_idx, &original_idx) in visible_columns.iter().enumerate() {
+                            for &original_idx in visible_columns.iter() {
                                 if original_idx >= fields.len() {
                                     // Column doesn't exist in this row, render empty cell
                                     row.col(|ui| {
@@ -2049,10 +2050,8 @@ impl FastCsvApp {
                     if ui.button("Apply").clicked() {
                         should_apply = true;
                     }
-                    if self.filter_state.has_filter(col_idx) {
-                        if ui.button("Clear").clicked() {
-                            should_clear = true;
-                        }
+                    if self.filter_state.has_filter(col_idx) && ui.button("Clear").clicked() {
+                        should_clear = true;
                     }
                     if ui.button("Cancel").clicked() {
                         should_close = true;
@@ -2167,7 +2166,7 @@ impl FastCsvApp {
                             .map(|(vis_idx, &orig_idx)| (orig_idx, vis_idx))
                             .collect();
 
-                        for (_display_idx, &original_idx) in column_order.iter().enumerate() {
+                        for &original_idx in column_order.iter() {
                             if original_idx >= headers.len() {
                                 continue;
                             }
