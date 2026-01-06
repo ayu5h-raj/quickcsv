@@ -165,6 +165,19 @@ impl FastCsvApp {
         self.last_visible_range = (0, 0);
         // Reset sort state
         self.sort_state = SortState::default();
+        // Reset column state (visibility, order)
+        self.column_state = ColumnState::default();
+        // Reset filter state
+        self.filter_state = FilterState::default();
+        self.filtered_indices = None;
+        self.filter_version = 0;
+        self.last_filter_version = 0;
+        self.filter_receiver = None;
+        self.is_filtering.store(false, Ordering::Relaxed);
+        self.applied_filters.clear();
+        self.applied_sort_column = None;
+        self.applied_sort_direction = SortDirection::None;
+        self.filter_duration = None;
         // Cancel any ongoing search and clear results
         self.search.cancel_flag.store(true, Ordering::SeqCst);
         self.search.current_index = 0;
