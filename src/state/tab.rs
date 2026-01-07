@@ -151,6 +151,7 @@ impl TabState {
 
     /// Create a new tab from file name (web)
     #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)] // May be useful for future WASM features
     pub fn from_name(name: String) -> Self {
         Self {
             state: Arc::new(RwLock::new(crate::state::SharedState::default())),
@@ -183,6 +184,7 @@ impl TabState {
     }
 
     /// Check if tab is empty (no file loaded)
+    #[allow(dead_code)] // May be useful for future features
     pub fn is_empty(&self) -> bool {
         let state = self.state.read();
         matches!(state.load_state, LoadState::Empty)

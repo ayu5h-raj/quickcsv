@@ -1,0 +1,32 @@
+[watch]
+# Explicitly watch only source directories - this is the key!
+watch = ["src", "Cargo.toml"]
+
+# Aggressively ignore everything else, especially target directory
+ignore = [
+    "target",
+    "target/**",
+    "dist",
+    "dist/**",
+    "**/*.log",
+    ".git",
+    ".git/**",
+    ".cargo",
+    ".cargo/**",
+    "**/*.json",
+    "Cargo.lock",  # Lock file changes shouldn't trigger rebuilds
+]
+
+# Clear screen on rebuild
+clear = true
+
+# Don't run on startup (prevents immediate restart)
+run_on_startup = false
+
+# Use polling (more reliable, less false positives)
+poll = true
+
+# Only watch for file changes, not directory metadata
+[watch.when]
+# Only trigger on actual file modifications
+file_events = true

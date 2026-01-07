@@ -189,6 +189,7 @@ impl FastCsvApp {
     }
 
     /// Get reference to active tab
+    #[allow(dead_code)] // May be useful for future features
     fn active_tab(&self) -> &TabState {
         &self.tabs[self.active_tab_index]
     }
@@ -950,6 +951,7 @@ impl FastCsvApp {
     }
 
     /// Get the actual row index considering sorting
+    #[allow(dead_code)] // May be useful for future features
     fn get_actual_row_index(&self, display_index: usize) -> usize {
         // Note: ensure_tabs requires &mut, but this method only needs &self
         // We'll assume tabs are already ensured by the caller
@@ -2864,6 +2866,13 @@ impl FastCsvApp {
                     ui.horizontal(|ui| {
                         ui.label("Value:");
                         let response = ui.text_edit_singleline(&mut tab.filter_state.filter_input);
+
+                        // Auto-focus when popup opens
+                        if tab.filter_state.focus_input {
+                            response.request_focus();
+                            tab.filter_state.focus_input = false;
+                        }
+
                         // Apply on Enter
                         if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                             should_apply = true;
@@ -3178,12 +3187,12 @@ impl eframe::App for FastCsvApp {
         {
             let tab = &mut self.tabs[tab_idx];
             ctx.input(|i| {
-                // Cmd/Ctrl+F to toggle search
+                // Cmd/Ctrl+F to open/focus search (always focus, don't toggle off)
                 if i.modifiers.command && i.key_pressed(Key::F) {
-                    tab.search.visible = !tab.search.visible;
-                    if tab.search.visible {
-                        tab.search.focus_input = true;
+                    if !tab.search.visible {
+                        tab.search.visible = true;
                     }
+                    tab.search.focus_input = true; // Always focus when Cmd+F is pressed
                 }
                 // Escape to close search
                 if i.key_pressed(Key::Escape) && tab.search.visible {
@@ -3233,14 +3242,7 @@ impl eframe::App for FastCsvApp {
             }
         }
 
-        // Tab bar panel (slim strip above menu/toolbar)
-        egui::TopBottomPanel::top("tab_bar")
-            .exact_height(26.0)
-            .show(ctx, |ui| {
-                self.render_tab_bar(ui);
-            });
-
-        // Top panel with menu/toolbar
+        // Top panel with menu/toolbar (rendered first, appears at top)
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui: &mut egui::Ui| {
                 ui.menu_button("File", |ui: &mut egui::Ui| {
@@ -3316,13 +3318,13 @@ impl eframe::App for FastCsvApp {
                         .add_enabled(has_nav_rows, egui::Button::new("Find Previous (⇧F3)"))
                         .clicked();
                     let should_go_to_row = ui.button("Go to Row... (⌘+L)").clicked();
-                    // Drop tab borrow before calling methods
+                    // Release tab borrow before calling methods
                     if should_next {
-                        drop(tab);
+                        let _ = tab; // Release borrow
                         ui.close();
                         self.next_match();
                     } else if should_prev {
-                        drop(tab);
+                        let _ = tab; // Release borrow
                         ui.close();
                         self.prev_match();
                     } else if should_go_to_row {
@@ -3364,6 +3366,13 @@ impl eframe::App for FastCsvApp {
                 });
             });
         });
+
+        // Tab bar panel (rendered after menu, appears below menu bar)
+        egui::TopBottomPanel::top("tab_bar")
+            .exact_height(26.0)
+            .show(ctx, |ui| {
+                self.render_tab_bar(ui);
+            });
 
         // Search bar panel (shown below menu when search is active)
         self.ensure_tabs();
