@@ -2831,69 +2831,149 @@ impl FastCsvApp {
         let mut should_apply = false;
         let mut should_clear = false;
 
+        // Show current filter status if one exists
+        let current_filter = tab.filter_state.filters.get(&col_idx);
+        let has_filter = tab.filter_state.has_filter(col_idx);
+
         egui::Window::new(format!("Filter: {}", col_name))
             .resizable(false)
             .collapsible(false)
-            .default_width(250.0)
+            .default_width(420.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(12.0);
 
-                // Operator dropdown
-                ui.horizontal(|ui| {
-                    ui.label("Operator:");
-                    egui::ComboBox::from_id_salt("filter_operator")
-                        .selected_text(tab.filter_state.selected_operator.display_name())
-                        .show_ui(ui, |ui| {
-                            for op in FilterOperator::all() {
-                                ui.selectable_value(
-                                    &mut tab.filter_state.selected_operator,
-                                    *op,
-                                    op.display_name(),
-                                );
-                            }
-                        });
-                });
+                // Compact active filter badge (if exists) - single line, non-intrusive
+                if let Some(filter) = current_filter {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} Current: {} {}",
+                                egui_phosphor::regular::FUNNEL_SIMPLE,
+                                filter.operator.display_name(),
+                                if filter.value.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("\"{}\"", filter.value)
+                                }
+                            ))
+                            .color(Color32::from_rgb(150, 200, 150)),
+                        );
+                    });
+                    ui.add_space(12.0);
+                }
 
-                ui.add_space(4.0);
-
-                // Value input (not needed for Empty/NotEmpty)
+                // Compact form layout - operator and value side by side when space allows
                 let needs_value = !matches!(
                     tab.filter_state.selected_operator,
                     FilterOperator::Empty | FilterOperator::NotEmpty
                 );
+
                 if needs_value {
+                    // Two-column layout for operator and value
                     ui.horizontal(|ui| {
-                        ui.label("Value:");
-                        let response = ui.text_edit_singleline(&mut tab.filter_state.filter_input);
+                        // Operator column
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("Operator")
+                                    .color(Color32::from_rgb(200, 200, 200)),
+                            );
+                            ui.add_space(6.0);
+                            egui::ComboBox::from_id_salt("filter_operator")
+                                .width(180.0)
+                                .selected_text(tab.filter_state.selected_operator.display_name())
+                                .show_ui(ui, |ui| {
+                                    for op in FilterOperator::all() {
+                                        ui.selectable_value(
+                                            &mut tab.filter_state.selected_operator,
+                                            *op,
+                                            op.display_name(),
+                                        );
+                                    }
+                                });
+                        });
 
-                        // Auto-focus when popup opens
-                        if tab.filter_state.focus_input {
-                            response.request_focus();
-                            tab.filter_state.focus_input = false;
-                        }
+                        ui.add_space(16.0);
 
-                        // Apply on Enter
-                        if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                            should_apply = true;
-                        }
+                        // Value column
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("Value")
+                                    .color(Color32::from_rgb(200, 200, 200)),
+                            );
+                            ui.add_space(6.0);
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut tab.filter_state.filter_input)
+                                    .desired_width(180.0),
+                            );
+
+                            // Auto-focus when popup opens
+                            if tab.filter_state.focus_input {
+                                response.request_focus();
+                                tab.filter_state.focus_input = false;
+                            }
+
+                            // Apply on Enter
+                            if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                should_apply = true;
+                            }
+                        });
+                    });
+                } else {
+                    // Single column for operators that don't need values
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Operator").color(Color32::from_rgb(200, 200, 200)),
+                        );
+                        ui.add_space(6.0);
+                        egui::ComboBox::from_id_salt("filter_operator")
+                            .width(380.0)
+                            .selected_text(tab.filter_state.selected_operator.display_name())
+                            .show_ui(ui, |ui| {
+                                for op in FilterOperator::all() {
+                                    ui.selectable_value(
+                                        &mut tab.filter_state.selected_operator,
+                                        *op,
+                                        op.display_name(),
+                                    );
+                                }
+                            });
                     });
                 }
 
-                ui.add_space(8.0);
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(12.0);
 
-                // Buttons
+                // Action buttons - primary action (Apply) on right, secondary on left
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
-                        should_apply = true;
+                    // Left side: Clear (if filter exists) and Cancel
+                    if has_filter {
+                        if ui
+                            .button(format!("{} Clear", egui_phosphor::regular::TRASH))
+                            .clicked()
+                        {
+                            should_clear = true;
+                        }
                     }
-                    if tab.filter_state.has_filter(col_idx) && ui.button("Clear").clicked() {
-                        should_clear = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        should_close = true;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Primary action on far right
+                        if ui
+                            .button(format!("{} Apply", egui_phosphor::regular::CHECK))
+                            .clicked()
+                        {
+                            should_apply = true;
+                        }
+                        // Cancel next to Apply
+                        if ui
+                            .button(format!("{} Cancel", egui_phosphor::regular::X))
+                            .clicked()
+                        {
+                            should_close = true;
+                        }
+                    });
                 });
+                ui.add_space(10.0);
             });
 
         // Handle actions after UI
