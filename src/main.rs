@@ -163,8 +163,7 @@ impl Default for FastCsvApp {
         let (tx, rx) = std::sync::mpsc::channel();
 
         // Start with one empty tab
-        let mut tabs = Vec::new();
-        tabs.push(TabState::new_empty());
+        let tabs = vec![TabState::new_empty()];
 
         Self {
             tabs,
@@ -1326,14 +1325,13 @@ impl FastCsvApp {
                             }
 
                             // Close button (only show if more than one tab)
-                            if self.tabs.len() > 1 {
-                                if ui
+                            if self.tabs.len() > 1
+                                && ui
                                     .small_button(egui_phosphor::regular::X)
                                     .on_hover_text("Close tab")
                                     .clicked()
-                                {
-                                    tabs_to_close.push(idx);
-                                }
+                            {
+                                tabs_to_close.push(idx);
                             }
                         }
                     });
@@ -2289,9 +2287,9 @@ impl FastCsvApp {
 
         // Determine title based on content type
         let title = if is_valid {
-            "📄 Cell Viewer (JSON)"
+            format!("{} Cell Viewer (JSON)", egui_phosphor::regular::FILE_CODE)
         } else {
-            "📄 Cell Viewer"
+            format!("{} Cell Viewer", egui_phosphor::regular::FILE_TEXT)
         };
 
         egui::Window::new(title)
@@ -2301,7 +2299,7 @@ impl FastCsvApp {
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(12.0);
 
                 // Header info bar with location and content type
                 ui.horizontal(|ui| {
@@ -2456,45 +2454,62 @@ impl FastCsvApp {
         let mut should_close = false;
         let mut should_go = false;
 
-        egui::Window::new("Go to Row")
-            .default_size([300.0, 100.0])
-            .resizable(false)
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.add_space(8.0);
+        egui::Window::new(format!(
+            "{} Go to Row",
+            egui_phosphor::regular::ARROW_CIRCLE_RIGHT
+        ))
+        .default_size([380.0, 140.0])
+        .resizable(false)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.add_space(12.0);
 
-                ui.horizontal(|ui| {
-                    ui.label("Row number:");
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut tab.go_to_row.input)
-                            .hint_text(format!("1 - {}", format_number(total_rows)))
-                            .desired_width(150.0),
-                    );
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Row number").color(Color32::from_rgb(200, 200, 200)));
+                ui.add_space(6.0);
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut tab.go_to_row.input)
+                        .hint_text(format!("1 - {}", format_number(total_rows)))
+                        .desired_width(350.0),
+                );
 
-                    // Auto-focus on open
-                    if tab.go_to_row.focus_input {
-                        response.request_focus();
-                        tab.go_to_row.focus_input = false;
-                    }
+                // Auto-focus on open
+                if tab.go_to_row.focus_input {
+                    response.request_focus();
+                    tab.go_to_row.focus_input = false;
+                }
 
-                    // Handle Enter key
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                // Handle Enter key
+                if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    should_go = true;
+                }
+            });
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            // Buttons - primary action on right
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(format!("{} Go", egui_phosphor::regular::CHECK))
+                        .clicked()
+                    {
                         should_go = true;
                     }
-                });
-
-                ui.add_space(8.0);
-
-                ui.horizontal(|ui| {
-                    if ui.button("Go").clicked() {
-                        should_go = true;
-                    }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    if ui
+                        .button(format!("{} Cancel", egui_phosphor::regular::X))
+                        .clicked()
+                        || ui.input(|i| i.key_pressed(Key::Escape))
+                    {
                         should_close = true;
                     }
                 });
             });
+            ui.add_space(10.0);
+        });
 
         if should_go {
             // Parse and validate row number
@@ -2560,216 +2575,211 @@ impl FastCsvApp {
         let mut open_json_for: Option<(usize, String, String)> = None;
         let mut toggle_expand: Option<usize> = None;
 
-        egui::Window::new(format!("📋 Row {} Details", row_num))
-            .default_size([600.0, 500.0])
-            .min_size([400.0, 300.0])
-            .resizable(true)
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.add_space(4.0);
+        egui::Window::new(format!(
+            "{} Row {} Details",
+            egui_phosphor::regular::LIST_BULLETS,
+            row_num
+        ))
+        .default_size([600.0, 500.0])
+        .min_size([400.0, 300.0])
+        .resizable(true)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.add_space(12.0);
 
-                // Header info bar
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{} columns", num_fields))
-                            .color(Color32::from_rgb(150, 150, 150)),
-                    );
+            // Header info bar
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{} columns", num_fields))
+                        .color(Color32::from_rgb(150, 150, 150)),
+                );
 
-                    // Copy buttons on the right
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button(format!("{} Copy as CSV", egui_phosphor::regular::COPY))
-                            .clicked()
-                        {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let csv_row = tab
-                                    .row_detail
-                                    .fields
-                                    .iter()
-                                    .map(|f| {
-                                        if f.contains(',') || f.contains('"') || f.contains('\n') {
-                                            format!("\"{}\"", f.replace('"', "\"\""))
-                                        } else {
-                                            f.clone()
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(",");
-                                let _ = clipboard.set_text(&csv_row);
-                            }
-                        }
-
-                        if ui
-                            .button(format!("{} Copy as JSON", egui_phosphor::regular::CODE))
-                            .clicked()
-                        {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let mut json_obj = serde_json::Map::new();
-                                for (i, field) in tab.row_detail.fields.iter().enumerate() {
-                                    let header = tab
-                                        .row_detail
-                                        .headers
-                                        .get(i)
-                                        .cloned()
-                                        .unwrap_or_else(|| format!("col_{}", i));
-                                    json_obj
-                                        .insert(header, serde_json::Value::String(field.clone()));
-                                }
-                                if let Ok(json_str) = serde_json::to_string_pretty(&json_obj) {
-                                    let _ = clipboard.set_text(&json_str);
-                                }
-                            }
-                        }
-                    });
-                });
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                // Scrollable field list
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .max_height(380.0)
-                    .show(ui, |ui| {
-                        for (i, field) in tab.row_detail.fields.iter().enumerate() {
-                            let header = tab
+                // Copy buttons on the right
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(format!("{} Copy as CSV", egui_phosphor::regular::COPY))
+                        .clicked()
+                    {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let csv_row = tab
                                 .row_detail
-                                .headers
-                                .get(i)
-                                .cloned()
-                                .unwrap_or_else(|| format!("Column {}", i + 1));
-                            let is_expanded = tab.row_detail.expanded_fields.contains(&i);
-                            let is_large = field.len() > 200;
-                            let is_json = looks_like_json(field);
-
-                            egui::Frame::NONE
-                                .fill(Color32::from_rgb(30, 30, 35))
-                                .corner_radius(egui::CornerRadius::same(4))
-                                .inner_margin(8.0)
-                                .outer_margin(egui::Margin::symmetric(0, 2))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        // Column name
-                                        ui.label(
-                                            egui::RichText::new(&header)
-                                                .color(Color32::from_rgb(130, 180, 230))
-                                                .strong(),
-                                        );
-
-                                        // Show size for large values
-                                        if is_large {
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "({} chars)",
-                                                    field.len()
-                                                ))
-                                                .color(Color32::from_rgb(100, 100, 100))
-                                                .size(11.0),
-                                            );
-                                        }
-
-                                        // Action buttons on the right
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                // Copy button
-                                                if ui
-                                                    .small_button(egui_phosphor::regular::COPY)
-                                                    .on_hover_text("Copy value")
-                                                    .clicked()
-                                                {
-                                                    #[cfg(not(target_arch = "wasm32"))]
-                                                    if let Ok(mut clipboard) =
-                                                        arboard::Clipboard::new()
-                                                    {
-                                                        let _ = clipboard.set_text(field);
-                                                    }
-                                                }
-
-                                                // JSON button if it looks like JSON
-                                                if is_json
-                                                    && ui
-                                                        .small_button(egui_phosphor::regular::CODE)
-                                                        .on_hover_text("View as JSON")
-                                                        .clicked()
-                                                {
-                                                    open_json_for = Some((
-                                                        tab.row_detail.row_index,
-                                                        header.clone(),
-                                                        field.clone(),
-                                                    ));
-                                                }
-
-                                                // Expand/collapse for large values
-                                                if is_large {
-                                                    let btn_text = if is_expanded {
-                                                        egui_phosphor::regular::CARET_UP
-                                                    } else {
-                                                        egui_phosphor::regular::CARET_DOWN
-                                                    };
-                                                    if ui
-                                                        .small_button(btn_text)
-                                                        .on_hover_text(if is_expanded {
-                                                            "Collapse"
-                                                        } else {
-                                                            "Expand"
-                                                        })
-                                                        .clicked()
-                                                    {
-                                                        toggle_expand = Some(i);
-                                                    }
-                                                }
-                                            },
-                                        );
-                                    });
-
-                                    ui.add_space(4.0);
-
-                                    // Value display
-                                    let display_value = if is_large && !is_expanded {
-                                        format!("{}...", &field[..field.len().min(200)])
+                                .fields
+                                .iter()
+                                .map(|f| {
+                                    if f.contains(',') || f.contains('"') || f.contains('\n') {
+                                        format!("\"{}\"", f.replace('"', "\"\""))
                                     } else {
-                                        field.clone()
-                                    };
-
-                                    ui.add(
-                                        egui::TextEdit::multiline(&mut display_value.as_str())
-                                            .font(egui::TextStyle::Monospace)
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(if is_large && is_expanded {
-                                                8
-                                            } else {
-                                                1
-                                            })
-                                            .interactive(false)
-                                            .text_color(Color32::from_rgb(200, 200, 210)),
-                                    );
-                                });
+                                        f.clone()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            let _ = clipboard.set_text(&csv_row);
                         }
-                    });
+                    }
 
-                ui.add_space(8.0);
-
-                // Close button
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(format!("{} Close", egui_phosphor::regular::X))
-                                    .min_size([80.0, 28.0].into())
-                                    .fill(Color32::from_rgb(60, 60, 70)),
-                            )
-                            .clicked()
-                        {
-                            should_close = true;
+                    if ui
+                        .button(format!("{} Copy as JSON", egui_phosphor::regular::CODE))
+                        .clicked()
+                    {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let mut json_obj = serde_json::Map::new();
+                            for (i, field) in tab.row_detail.fields.iter().enumerate() {
+                                let header = tab
+                                    .row_detail
+                                    .headers
+                                    .get(i)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("col_{}", i));
+                                json_obj.insert(header, serde_json::Value::String(field.clone()));
+                            }
+                            if let Ok(json_str) = serde_json::to_string_pretty(&json_obj) {
+                                let _ = clipboard.set_text(&json_str);
+                            }
                         }
-                    });
+                    }
                 });
             });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Scrollable field list
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(380.0)
+                .show(ui, |ui| {
+                    for (i, field) in tab.row_detail.fields.iter().enumerate() {
+                        let header = tab
+                            .row_detail
+                            .headers
+                            .get(i)
+                            .cloned()
+                            .unwrap_or_else(|| format!("Column {}", i + 1));
+                        let is_expanded = tab.row_detail.expanded_fields.contains(&i);
+                        let is_large = field.len() > 200;
+                        let is_json = looks_like_json(field);
+
+                        egui::Frame::NONE
+                            .fill(Color32::from_rgb(30, 30, 35))
+                            .corner_radius(egui::CornerRadius::same(4))
+                            .inner_margin(8.0)
+                            .outer_margin(egui::Margin::symmetric(0, 2))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    // Column name
+                                    ui.label(
+                                        egui::RichText::new(&header)
+                                            .color(Color32::from_rgb(130, 180, 230))
+                                            .strong(),
+                                    );
+
+                                    // Show size for large values
+                                    if is_large {
+                                        ui.label(
+                                            egui::RichText::new(format!("({} chars)", field.len()))
+                                                .color(Color32::from_rgb(100, 100, 100))
+                                                .size(11.0),
+                                        );
+                                    }
+
+                                    // Action buttons on the right
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            // Copy button
+                                            if ui
+                                                .small_button(egui_phosphor::regular::COPY)
+                                                .on_hover_text("Copy value")
+                                                .clicked()
+                                            {
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                if let Ok(mut clipboard) = arboard::Clipboard::new()
+                                                {
+                                                    let _ = clipboard.set_text(field);
+                                                }
+                                            }
+
+                                            // JSON button if it looks like JSON
+                                            if is_json
+                                                && ui
+                                                    .small_button(egui_phosphor::regular::CODE)
+                                                    .on_hover_text("View as JSON")
+                                                    .clicked()
+                                            {
+                                                open_json_for = Some((
+                                                    tab.row_detail.row_index,
+                                                    header.clone(),
+                                                    field.clone(),
+                                                ));
+                                            }
+
+                                            // Expand/collapse for large values
+                                            if is_large {
+                                                let btn_text = if is_expanded {
+                                                    egui_phosphor::regular::CARET_UP
+                                                } else {
+                                                    egui_phosphor::regular::CARET_DOWN
+                                                };
+                                                if ui
+                                                    .small_button(btn_text)
+                                                    .on_hover_text(if is_expanded {
+                                                        "Collapse"
+                                                    } else {
+                                                        "Expand"
+                                                    })
+                                                    .clicked()
+                                                {
+                                                    toggle_expand = Some(i);
+                                                }
+                                            }
+                                        },
+                                    );
+                                });
+
+                                ui.add_space(4.0);
+
+                                // Value display
+                                let display_value = if is_large && !is_expanded {
+                                    format!("{}...", &field[..field.len().min(200)])
+                                } else {
+                                    field.clone()
+                                };
+
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut display_value.as_str())
+                                        .font(egui::TextStyle::Monospace)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(if is_large && is_expanded { 8 } else { 1 })
+                                        .interactive(false)
+                                        .text_color(Color32::from_rgb(200, 200, 210)),
+                                );
+                            });
+                    }
+                });
+
+            ui.add_space(8.0);
+
+            // Close button
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(format!("{} Close", egui_phosphor::regular::X))
+                                .min_size([80.0, 28.0].into())
+                                .fill(Color32::from_rgb(60, 60, 70)),
+                        )
+                        .clicked()
+                    {
+                        should_close = true;
+                    }
+                });
+            });
+        });
 
         // Handle toggle expand
         if let Some(idx) = toggle_expand {
@@ -2948,13 +2958,12 @@ impl FastCsvApp {
                 // Action buttons - primary action (Apply) on right, secondary on left
                 ui.horizontal(|ui| {
                     // Left side: Clear (if filter exists) and Cancel
-                    if has_filter {
-                        if ui
+                    if has_filter
+                        && ui
                             .button(format!("{} Clear", egui_phosphor::regular::TRASH))
                             .clicked()
-                        {
-                            should_clear = true;
-                        }
+                    {
+                        should_clear = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Primary action on far right
@@ -3028,13 +3037,13 @@ impl FastCsvApp {
         let mut move_up: Option<usize> = None;
         let mut move_down: Option<usize> = None;
 
-        egui::Window::new("Column Manager")
+        egui::Window::new(format!("{} Column Manager", egui_phosphor::regular::SLIDERS))
             .default_size([400.0, 500.0])
             .resizable(true)
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.add_space(8.0);
+                ui.add_space(12.0);
 
                 // Action buttons at top
                 ui.horizontal(|ui| {
@@ -3066,9 +3075,9 @@ impl FastCsvApp {
                     });
                 });
 
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 ui.separator();
-                ui.add_space(4.0);
+                ui.add_space(12.0);
 
                 // Column list
                 egui::ScrollArea::vertical()
@@ -3555,7 +3564,7 @@ impl eframe::App for FastCsvApp {
             let load_state = {
                 let tab = &self.tabs[self.active_tab_index];
                 let state = tab.state.read();
-                state.load_state.clone()
+                state.load_state
             };
 
             // Expand window when file is loaded (only once, native only)
@@ -3871,10 +3880,36 @@ fn main() {
     let web_options = eframe::WebOptions::default();
 
     wasm_bindgen_futures::spawn_local(async {
-        let document = web_sys::window()
-            .expect("No window")
-            .document()
-            .expect("No document");
+        let window = web_sys::window().expect("No window");
+        let document = window.document().expect("No document");
+
+        // Prevent browser's default Cmd+F/Ctrl+F behavior
+        // Use bubble phase (not capture) so egui gets the event first, then we prevent browser default
+        {
+            let doc_closure = wasm_bindgen::closure::Closure::wrap(Box::new(
+                move |event: web_sys::KeyboardEvent| {
+                    // Check for Cmd+F (Mac) or Ctrl+F (Windows/Linux)
+                    let is_cmd_or_ctrl = event.meta_key() || event.ctrl_key();
+                    let is_f = event.key() == "f" || event.key() == "F" || event.code() == "KeyF";
+
+                    if is_cmd_or_ctrl && is_f {
+                        // Prevent browser's default find dialog
+                        // This runs in bubble phase, so egui should have already handled it
+                        event.prevent_default();
+                    }
+                },
+            )
+                as Box<dyn FnMut(_)>);
+
+            // Add listener in bubble phase (default, useCapture = false)
+            // This allows egui to handle the event first, then we prevent browser default
+            document
+                .add_event_listener_with_callback("keydown", doc_closure.as_ref().unchecked_ref())
+                .expect("Failed to add keydown listener to document");
+
+            // Keep closure alive
+            doc_closure.forget();
+        }
 
         // Hide the loading spinner
         if let Some(loading_element) = document.get_element_by_id("center_text") {
