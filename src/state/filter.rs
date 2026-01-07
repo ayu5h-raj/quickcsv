@@ -100,6 +100,8 @@ pub struct FilterState {
     pub filter_input: String,
     /// Selected operator in popup
     pub selected_operator: FilterOperator,
+    /// Whether to focus the input field when popup opens
+    pub focus_input: bool,
 }
 
 impl FilterState {
@@ -147,7 +149,8 @@ impl FilterState {
     /// Open filter popup for a column
     pub fn open_popup(&mut self, column_idx: usize) {
         self.active_popup = Some(column_idx);
-        // Pre-fill with existing filter if any
+        self.focus_input = true; // Request focus on input when popup opens
+                                 // Pre-fill with existing filter if any
         if let Some(condition) = self.filters.get(&column_idx) {
             self.filter_input = condition.value.clone();
             self.selected_operator = condition.operator;
@@ -169,6 +172,7 @@ impl FilterState {
     pub fn close_popup(&mut self) {
         self.active_popup = None;
         self.filter_input.clear();
+        self.focus_input = false;
     }
 }
 

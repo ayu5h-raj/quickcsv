@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// Search execution state
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 #[allow(dead_code)]
 pub enum SearchStatus {
     #[default]
