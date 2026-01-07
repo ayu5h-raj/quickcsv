@@ -213,6 +213,41 @@ egui::Window::new(format!("{} Dialog Title", egui_phosphor::regular::ICON_NAME))
     });
 ```
 
+## Testing
+
+**CRITICAL: Always run tests locally before committing**
+
+QuickCSV has comprehensive unit tests for core functionality. Always run tests before committing:
+
+```bash
+# Run all tests
+cargo test
+
+# Run tests with output
+cargo test -- --nocapture
+
+# Run specific test module
+cargo test search_tests
+
+# Run tests in release mode (faster)
+cargo test --release
+```
+
+**Test coverage:**
+- Search functionality (case-insensitive, query trimming, status tracking)
+- Filter operators (all operators, edge cases)
+- Format utilities (number formatting, file size, JSON formatting)
+- Update checking logic
+
+**Before committing, always run:**
+```bash
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
+cargo check
+cargo check --target wasm32-unknown-unknown
+```
+
 ## Common Tasks
 
 ### Adding a new feature
@@ -220,11 +255,13 @@ egui::Window::new(format!("{} Dialog Title", egui_phosphor::regular::ICON_NAME))
 2. Implement in `src/main.rs`
 3. Use Phosphor icons for all UI elements
 4. Test with large CSV files
-5. **Verify both builds**: 
+5. **Write tests** for new functionality (if applicable)
+6. **Verify both builds**: 
    - `cargo fmt && cargo clippy -- -D warnings`
+   - `cargo test` (run all tests)
    - `cargo check` (desktop)
    - `cargo check --target wasm32-unknown-unknown` (web)
-6. Commit, push branch, create PR
+7. Commit, push branch, create PR
 
 ### Making a release
 1. Bump version in Cargo.toml
