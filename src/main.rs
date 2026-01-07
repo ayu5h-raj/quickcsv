@@ -4167,7 +4167,7 @@ mod search_tests {
     /// Test search results structure
     #[test]
     fn test_search_results_default() {
-        use crate::state::SearchResults;
+        use crate::state::search::SearchResults;
         let results = SearchResults::default();
         assert_eq!(results.status, SearchStatus::Idle);
         assert_eq!(results.rows_searched, 0);
