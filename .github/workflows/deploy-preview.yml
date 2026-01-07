@@ -34,7 +34,7 @@ jobs:
           version: 'latest'
           
       - name: Build WASM
-        run: trunk build --release --public-url /quickcsv-preview/
+        run: trunk build --release --public-url /quickcsv/preview/
         
       - name: Add .nojekyll
         run: touch dist/.nojekyll
@@ -49,6 +49,6 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist
-          destination_dir: quickcsv-preview  # Matches --public-url /quickcsv-preview/
+          destination_dir: preview  # Matches --public-url /quickcsv/preview/
           keep_files: false  # Single preview location, overwrite on each deploy
           commit_message: ${{ steps.deploy.outputs.message }}
