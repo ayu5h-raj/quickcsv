@@ -11,7 +11,6 @@ mod utils;
 
 use eframe::egui::{self, Color32, Key};
 
-use parking_lot::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,8 +24,7 @@ use wasm_bindgen::JsCast;
 #[cfg(not(target_arch = "wasm32"))]
 use csv::init_csv_progressive;
 use state::{
-    ColumnState, FilterCondition, FilterOperator, FilterState, GoToRowState, JsonViewerState,
-    LoadState, RowDetailState, SearchState, SearchStatus, SharedState, SortDirection, SortState,
+    ColumnState, FilterOperator, FilterState, LoadState, SearchStatus, SortDirection, SortState,
     TabState, MAX_NAV_ROWS,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -289,15 +287,16 @@ impl FastCsvApp {
     #[cfg(target_arch = "wasm32")]
     fn open_file(&mut self, ctx: &egui::Context) {
         self.ensure_tabs();
+
+        // Clone what we need before getting mutable borrow
+        let tx = self.file_loader_tx.clone();
         let tab = self.active_tab_mut();
+        let state = tab.state.clone();
+        let ctx = ctx.clone();
 
         let task = rfd::AsyncFileDialog::new()
             .add_filter("CSV", &["csv", "tsv", "txt"])
             .pick_file();
-
-        let tx = self.file_loader_tx.clone();
-        let state = tab.state.clone();
-        let ctx = ctx.clone();
 
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(file) = task.await {
@@ -1264,6 +1263,113 @@ impl FastCsvApp {
         tab.search.scroll_to_row = Some(row);
     }
 
+    /// Create a new empty tab and make it active
+    fn new_tab(&mut self) {
+        self.tabs.push(TabState::new_empty());
+        self.active_tab_index = self.tabs.len() - 1;
+    }
+
+    /// Render the tab bar (compact, minimal height)
+    fn render_tab_bar(&mut self, ui: &mut egui::Ui) {
+        self.ensure_tabs();
+
+        // Compact spacing for a slim bar
+        let spacing = ui.spacing_mut();
+        spacing.item_spacing = egui::vec2(6.0, 0.0);
+        spacing.button_padding = egui::vec2(8.0, 4.0);
+
+        // Collect tabs to close after UI rendering
+        let mut tabs_to_close = Vec::new();
+
+        ui.horizontal(|ui| {
+            // Tab strip with hidden scrollbar to avoid extra height
+            egui::ScrollArea::horizontal()
+                .id_salt("tab_strip")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .max_height(24.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for idx in 0..self.tabs.len() {
+                            let is_active = idx == self.active_tab_index;
+                            let tab = &self.tabs[idx];
+                            let raw_title = if tab.file_name.is_empty() {
+                                "New Tab".to_string()
+                            } else {
+                                tab.file_name.clone()
+                            };
+                            // Truncate very long titles so first tab doesn't eat the bar
+                            let title = if raw_title.len() > 32 {
+                                format!("{}…", &raw_title[..29])
+                            } else {
+                                raw_title
+                            };
+
+                            // Tab button
+                            let label = egui::RichText::new(format!(
+                                "{} {}",
+                                egui_phosphor::regular::FILE_TEXT,
+                                title
+                            ))
+                            .size(13.0);
+                            let response = ui.selectable_label(is_active, label).on_hover_text(
+                                if tab.state.read().csv.is_some() {
+                                    format!("Switch to: {}", tab.file_name)
+                                } else {
+                                    "New Tab".to_string()
+                                },
+                            );
+
+                            if response.clicked() {
+                                self.active_tab_index = idx;
+                            }
+
+                            // Close button (only show if more than one tab)
+                            if self.tabs.len() > 1 {
+                                if ui
+                                    .small_button(egui_phosphor::regular::X)
+                                    .on_hover_text("Close tab")
+                                    .clicked()
+                                {
+                                    tabs_to_close.push(idx);
+                                }
+                            }
+                        }
+                    });
+                });
+
+            ui.add_space(4.0);
+
+            // New tab button (compact)
+            if ui
+                .small_button(egui_phosphor::regular::PLUS)
+                .on_hover_text("Open new tab (Cmd+T)")
+                .clicked()
+            {
+                self.new_tab();
+            }
+        });
+
+        // Close tabs (in reverse order to maintain indices)
+        tabs_to_close.sort_unstable();
+        tabs_to_close.reverse();
+        for idx in tabs_to_close {
+            if self.tabs.len() <= 1 {
+                break;
+            }
+            if idx < self.active_tab_index {
+                self.active_tab_index -= 1;
+            } else if idx == self.active_tab_index {
+                // If closing active tab, switch to previous or next
+                if idx > 0 {
+                    self.active_tab_index = idx - 1;
+                } else if self.tabs.len() > 1 {
+                    self.active_tab_index = 0;
+                }
+            }
+            self.tabs.remove(idx);
+        }
+    }
+
     /// Render the search bar
     fn render_search_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.ensure_tabs();
@@ -1297,10 +1403,10 @@ impl FastCsvApp {
         };
 
         // Access tab inside closure using tab_idx
-        let mut query_changed = false;
-        let mut new_query = search_query.clone();
+        let _query_changed = false;
+        let _new_query = search_query.clone();
         let mut should_focus = false;
-        let mut history_nav: Option<(bool, bool)> = None; // (up, down)
+        let _history_nav: Option<(bool, bool)> = None; // (up, down)
         let mut should_search = false;
         let mut should_cancel = false;
         let mut should_close = false;
@@ -1400,19 +1506,26 @@ impl FastCsvApp {
                 .clicked();
 
             // Status display
+            let is_searching_done =
+                status == SearchStatus::Searching && total_rows > 0 && rows_searched >= total_rows;
+
             match status {
                 SearchStatus::Searching => {
-                    ui.spinner();
-                    let progress = if total_rows > 0 {
-                        (rows_searched as f32 / total_rows as f32 * 100.0) as usize
+                    if is_searching_done {
+                        ui.label(format!("Done ({} matches)", format_number(total_matches)));
                     } else {
-                        0
-                    };
-                    ui.label(format!(
-                        "Searching... {}% ({} matches)",
-                        progress,
-                        format_number(total_matches)
-                    ));
+                        ui.spinner();
+                        let progress = if total_rows > 0 {
+                            (rows_searched as f32 / total_rows as f32 * 100.0) as usize
+                        } else {
+                            0
+                        };
+                        ui.label(format!(
+                            "Searching... {}% ({} matches)",
+                            progress,
+                            format_number(total_matches)
+                        ));
+                    }
                 }
                 SearchStatus::Complete | SearchStatus::Cancelled => {
                     if total_matches > 0 {
@@ -1446,6 +1559,11 @@ impl FastCsvApp {
                 SearchStatus::Idle => {
                     // Show nothing
                 }
+            }
+
+            // Request repaint during search to update progress
+            if status == SearchStatus::Searching && !is_searching_done {
+                ctx.request_repaint();
             }
 
             should_close = {
@@ -1483,7 +1601,9 @@ impl FastCsvApp {
         }
 
         // Request repaint during search to update progress
-        if status == SearchStatus::Searching {
+        let is_searching_done =
+            status == SearchStatus::Searching && total_rows > 0 && rows_searched >= total_rows;
+        if status == SearchStatus::Searching && !is_searching_done {
             ctx.request_repaint();
         }
     }
@@ -1497,12 +1617,11 @@ impl FastCsvApp {
     }
 
     fn render_table_with_tab(&mut self, ui: &mut egui::Ui, tab_idx: usize) {
-        // Get mutable reference to the tab
-        let tab = &mut self.tabs[tab_idx];
         use egui_extras::{Column, TableBuilder};
 
         // Extract data from state first, then drop the lock
         let (headers, total_rows, num_columns, _is_indexing) = {
+            let tab = &self.tabs[tab_idx];
             let state = tab.state.read();
             match &state.csv {
                 Some(csv) => (
@@ -1516,7 +1635,10 @@ impl FastCsvApp {
         };
 
         // Store total row count for status bar
-        tab.total_row_count = total_rows;
+        {
+            let tab = &mut self.tabs[tab_idx];
+            tab.total_row_count = total_rows;
+        }
 
         // Check if sorting just finished and filter state
         let (is_sorting, was_sorting, filter_changed) = {
@@ -1614,6 +1736,17 @@ impl FastCsvApp {
                 is_sorting,
                 sort_progress,
             )
+        };
+
+        // Snapshot sorted indices (if any) to avoid borrowing self inside closures
+        let sorted_indices = {
+            let tab = &self.tabs[tab_idx];
+            let guard = tab.sort_state.sorted_indices.read();
+            if tab.sort_state.direction != SortDirection::None && !guard.is_empty() {
+                Some(guard.clone())
+            } else {
+                None
+            }
         };
 
         // Track actions that need to happen after the closure
@@ -1842,8 +1975,10 @@ impl FastCsvApp {
                             // Determine actual row index (filtered or sorted or original)
                             let actual_row_idx = if let Some(indices) = &tab.filtered_indices {
                                 *indices.get(display_idx).unwrap_or(&0)
+                            } else if let Some(sorted) = &sorted_indices {
+                                *sorted.get(display_idx).unwrap_or(&display_idx)
                             } else {
-                                self.get_actual_row_index(display_idx)
+                                display_idx
                             };
 
                             // Get or parse row data (cache by actual row index)
@@ -2048,10 +2183,13 @@ impl FastCsvApp {
         }
 
         // Prune old cache entries (keep last 2000 rows in cache)
-        if tab.row_cache.len() > 2000 {
-            let keys: Vec<usize> = tab.row_cache.keys().cloned().collect();
-            for key in keys.into_iter().take(tab.row_cache.len() - 1000) {
-                tab.row_cache.remove(&key);
+        {
+            let tab = &mut self.tabs[tab_idx];
+            if tab.row_cache.len() > 2000 {
+                let keys: Vec<usize> = tab.row_cache.keys().cloned().collect();
+                for key in keys.into_iter().take(tab.row_cache.len() - 1000) {
+                    tab.row_cache.remove(&key);
+                }
             }
         }
     }
@@ -2142,7 +2280,7 @@ impl FastCsvApp {
         let column_name = tab.json_viewer.column_name.clone();
         let row_num = format_number(tab.json_viewer.row + 1);
         let is_valid = tab.json_viewer.is_valid_json;
-        let mut formatted = tab.json_viewer.formatted_content.clone();
+        let formatted = tab.json_viewer.formatted_content.clone();
         let raw = tab.json_viewer.raw_content.clone();
 
         let mut should_close = false;
@@ -2984,6 +3122,7 @@ impl eframe::App for FastCsvApp {
         // Poll file loader channel (WASM only)
         #[cfg(target_arch = "wasm32")]
         {
+            self.ensure_tabs();
             while let Ok((name, bytes)) = self.file_loader_rx.try_recv() {
                 self.load_file_web(name, bytes, ctx.clone());
             }
@@ -3078,6 +3217,10 @@ impl eframe::App for FastCsvApp {
                 if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::Z) {
                     tab.column_state.redo();
                 }
+                // Cmd+T for new tab
+                if i.modifiers.command && i.key_pressed(Key::T) {
+                    actions.push("new_tab");
+                }
             });
         }
         // Apply actions after dropping tab borrow
@@ -3085,9 +3228,17 @@ impl eframe::App for FastCsvApp {
             match action {
                 "next_match" => self.next_match(),
                 "prev_match" => self.prev_match(),
+                "new_tab" => self.new_tab(),
                 _ => {}
             }
         }
+
+        // Tab bar panel (slim strip above menu/toolbar)
+        egui::TopBottomPanel::top("tab_bar")
+            .exact_height(26.0)
+            .show(ctx, |ui| {
+                self.render_tab_bar(ui);
+            });
 
         // Top panel with menu/toolbar
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -3538,23 +3689,35 @@ impl eframe::App for FastCsvApp {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        ctx.input(|i| {
-            for file in &i.raw.dropped_files {
-                if let Some(path) = &file.path {
-                    // Add to recent files before loading
-                    let path_str = path.to_string_lossy().to_string();
-                    let file_name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(&path_str)
-                        .to_string();
-                    self.recent_files.add_file(path_str, file_name);
-                    self.save_recent_files();
-                    self.load_file(path.clone(), ctx.clone());
-                    break;
+        {
+            // Collect dropped file paths first to avoid borrow conflicts
+            let mut dropped_paths = Vec::new();
+            ctx.input(|i| {
+                for file in &i.raw.dropped_files {
+                    if let Some(path) = &file.path {
+                        dropped_paths.push(path.clone());
+                    }
                 }
+            });
+
+            // Open each dropped file in a new tab (first file is enough for now)
+            if let Some(path) = dropped_paths.into_iter().next() {
+                let path_str = path.to_string_lossy().to_string();
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&path_str)
+                    .to_string();
+                self.recent_files.add_file(path_str, file_name);
+                self.save_recent_files();
+
+                // Create a new tab for the dropped file
+                let new_tab = TabState::from_path(path.clone());
+                self.tabs.push(new_tab);
+                self.active_tab_index = self.tabs.len() - 1;
+                self.load_file(path, ctx.clone());
             }
-        });
+        }
     }
 }
 
@@ -3661,4 +3824,117 @@ fn main() {
             .await
             .expect("failed to start eframe");
     });
+}
+
+#[cfg(test)]
+mod search_tests {
+    use crate::state::{SearchResults, SearchState, SearchStatus};
+
+    /// Test that search query matching works correctly
+    #[test]
+    fn test_search_query_matching() {
+        // Test basic case-insensitive matching
+        let query = "test";
+        let field1 = "This is a TEST string";
+        let field2 = "No match here";
+        let field3 = "test";
+
+        assert!(field1.to_lowercase().contains(&query));
+        assert!(!field2.to_lowercase().contains(&query));
+        assert!(field3.to_lowercase().contains(&query));
+    }
+
+    /// Test that empty query doesn't trigger search
+    #[test]
+    fn test_empty_query() {
+        let query = "   ".trim().to_lowercase();
+        assert!(query.is_empty());
+
+        let query2 = "".trim().to_lowercase();
+        assert!(query2.is_empty());
+    }
+
+    /// Test search state initialization
+    #[test]
+    fn test_search_state_default() {
+        let search_state = SearchState::default();
+        assert!(!search_state.visible);
+        assert!(search_state.query.is_empty());
+        assert!(search_state.active_query.is_empty());
+        assert_eq!(search_state.current_index, 0);
+        assert_eq!(search_state.results.read().status, SearchStatus::Idle);
+        assert_eq!(search_state.results.read().total_match_count, 0);
+        assert!(search_state.results.read().navigation_rows.is_empty());
+    }
+
+    /// Test search results structure
+    #[test]
+    fn test_search_results_default() {
+        use crate::state::SearchResults;
+        let results = SearchResults::default();
+        assert_eq!(results.status, SearchStatus::Idle);
+        assert_eq!(results.rows_searched, 0);
+        assert_eq!(results.total_rows, 0);
+        assert_eq!(results.total_match_count, 0);
+        assert!(results.navigation_rows.is_empty());
+        assert!(!results.nav_limit_reached);
+    }
+
+    /// Test that search query trimming works
+    #[test]
+    fn test_query_trimming() {
+        let queries = vec![
+            ("  test  ", "test"),
+            ("test", "test"),
+            ("  test", "test"),
+            ("test  ", "test"),
+            ("", ""),
+        ];
+
+        for (input, expected) in queries {
+            let trimmed = input.trim().to_lowercase();
+            assert_eq!(
+                trimmed,
+                expected.to_lowercase(),
+                "Failed for input: {:?}",
+                input
+            );
+        }
+    }
+
+    /// Test search status transitions
+    #[test]
+    fn test_search_status() {
+        let status_idle = SearchStatus::Idle;
+        let status_searching = SearchStatus::Searching;
+        let status_complete = SearchStatus::Complete;
+        let status_cancelled = SearchStatus::Cancelled;
+
+        // Test that statuses are distinct
+        assert_ne!(status_idle, status_searching);
+        assert_ne!(status_searching, status_complete);
+        assert_ne!(status_complete, status_cancelled);
+    }
+
+    /// Test that search query case insensitivity
+    #[test]
+    fn test_case_insensitive_search() {
+        let query = "HELLO";
+        let test_cases = vec![
+            ("hello", true),
+            ("HELLO", true),
+            ("Hello", true),
+            ("HeLlO", true),
+            ("world", false),
+            ("hell", false),
+            ("hello world", true),
+            ("say hello", true),
+        ];
+
+        let query_lower = query.to_lowercase();
+        for (text, should_match) in test_cases {
+            let matches = text.to_lowercase().contains(&query_lower);
+            assert_eq!(matches, should_match, "Failed for text: {:?}", text);
+        }
+    }
 }

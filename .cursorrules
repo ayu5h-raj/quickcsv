@@ -4,7 +4,7 @@ This file contains instructions for AI coding agents working on this project.
 
 ## Project Overview
 
-QuickCSV is a high-performance CSV viewer for macOS built with Rust and egui.
+QuickCSV is a high-performance CSV viewer for macOS and Web built with Rust and egui. It supports both native (desktop) and web (WASM) platforms.
 
 ## Tech Stack
 
@@ -29,6 +29,25 @@ QuickCSV is a high-performance CSV viewer for macOS built with Rust and egui.
 - **ALWAYS use Phosphor icons** - Never use emoji or text-only buttons. Use `egui_phosphor::regular::ICON_NAME` for all icons
 - **NEVER work directly on main branch** - Always create a feature/fix branch first
 - **Only push to main** when bumping version and creating a release tag
+
+## Build Verification
+
+**CRITICAL: Always verify both desktop and web builds after making changes**
+
+QuickCSV supports both native (macOS) and web (WASM) platforms. After any code modification:
+
+1. **Check desktop build**: `cargo check` (or `cargo build`)
+2. **Check web/WASM build**: `cargo check --target wasm32-unknown-unknown`
+
+Both builds must compile successfully before committing. The web build uses different code paths (e.g., `#[cfg(target_arch = "wasm32")]`) and may expose issues not visible in the desktop build.
+
+**Before committing, always run:**
+```bash
+cargo fmt
+cargo clippy -- -D warnings
+cargo check
+cargo check --target wasm32-unknown-unknown
+```
 
 ## Git Workflow
 
@@ -109,7 +128,10 @@ QuickCSV is a high-performance CSV viewer for macOS built with Rust and egui.
 2. Implement in `src/main.rs`
 3. Use Phosphor icons for all UI elements
 4. Test with large CSV files
-5. Run `cargo fmt && cargo clippy -- -D warnings`
+5. **Verify both builds**: 
+   - `cargo fmt && cargo clippy -- -D warnings`
+   - `cargo check` (desktop)
+   - `cargo check --target wasm32-unknown-unknown` (web)
 6. Commit, push branch, create PR
 
 ### Making a release
