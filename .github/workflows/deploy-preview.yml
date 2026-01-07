@@ -1,0 +1,66 @@
+name: Deploy Web Preview
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - master
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - '.cursorrules'
+  pull_request:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - '.cursorrules'
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-deploy-preview:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          
+      - name: Install Trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: 'latest'
+          
+      - name: Build WASM
+        run: trunk build --release --public-url /quickcsv-preview/
+        
+      - name: Add .nojekyll
+        run: touch dist/.nojekyll
+      
+      - name: Determine deployment message
+        id: deploy
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "message=Preview: PR #${{ github.event.pull_request.number }} (${{ github.head_ref }})" >> $GITHUB_OUTPUT
+          else
+            echo "message=Preview: ${{ github.ref_name }} (${{ github.sha }})" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Deploy to GitHub Pages Preview
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          destination_dir: quickcsv-preview  # Matches --public-url /quickcsv-preview/
+          keep_files: false  # Single preview location, overwrite on each deploy
+          commit_message: ${{ steps.deploy.outputs.message }}
