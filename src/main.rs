@@ -149,6 +149,8 @@ struct FastCsvApp {
     /// Whether window has been expanded after file load
     #[allow(dead_code)] // Used in native code only
     window_expanded: bool,
+    /// Whether keyboard shortcuts dialog is open
+    shortcuts_dialog_open: bool,
     /// Channel for receiving loaded file data from async web tasks (WASM)
     #[cfg(target_arch = "wasm32")]
     file_loader_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
@@ -173,6 +175,7 @@ impl Default for FastCsvApp {
             recent_files: RecentFiles::default(),
             recent_files_loaded: false,
             window_expanded: false,
+            shortcuts_dialog_open: false,
             #[cfg(target_arch = "wasm32")]
             file_loader_tx: tx,
             #[cfg(target_arch = "wasm32")]
@@ -1268,6 +1271,25 @@ impl FastCsvApp {
     fn new_tab(&mut self) {
         self.tabs.push(TabState::new_empty());
         self.active_tab_index = self.tabs.len() - 1;
+    }
+
+    /// Close the active tab (only if more than one tab exists)
+    fn close_active_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            return; // Don't close the last tab
+        }
+
+        let idx = self.active_tab_index;
+
+        // Adjust active tab index
+        if idx > 0 {
+            self.active_tab_index = idx - 1;
+        } else if self.tabs.len() > 1 {
+            self.active_tab_index = 0;
+        }
+
+        // Remove the tab
+        self.tabs.remove(idx);
     }
 
     /// Render the tab bar (compact, minimal height)
@@ -3000,6 +3022,136 @@ impl FastCsvApp {
         }
     }
 
+    /// Render the Keyboard Shortcuts dialog
+    fn render_shortcuts_dialog(&mut self, ctx: &egui::Context) {
+        if !self.shortcuts_dialog_open {
+            return;
+        }
+
+        // Handle Escape to close
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.shortcuts_dialog_open = false;
+            return;
+        }
+
+        let mut should_close = false;
+
+        egui::Window::new(format!(
+            "{} Keyboard Shortcuts",
+            egui_phosphor::regular::KEYBOARD
+        ))
+        .default_size([520.0, 450.0])
+        .resizable(true)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.add_space(12.0);
+
+            // Scrollable content area
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(350.0)
+                .show(ui, |ui| {
+                    // Group shortcuts by category
+                    ui.vertical(|ui| {
+                        // File & Tabs
+                        ui.label(
+                            egui::RichText::new("File & Tabs")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(200, 200, 200)),
+                        );
+                        ui.add_space(8.0);
+                        self.render_shortcut_row(ui, "⌘+T", "New Tab");
+                        self.render_shortcut_row(ui, "⌘+W", "Close Active Tab");
+                        ui.add_space(16.0);
+
+                        // Search & Navigation
+                        ui.label(
+                            egui::RichText::new("Search & Navigation")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(200, 200, 200)),
+                        );
+                        ui.add_space(8.0);
+                        self.render_shortcut_row(ui, "⌘+F", "Open/Focus Search");
+                        self.render_shortcut_row(ui, "F3", "Find Next Match");
+                        self.render_shortcut_row(ui, "⇧+F3", "Find Previous Match");
+                        self.render_shortcut_row(ui, "⌘+L", "Go to Row");
+                        ui.add_space(16.0);
+
+                        // Columns
+                        ui.label(
+                            egui::RichText::new("Columns")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(200, 200, 200)),
+                        );
+                        ui.add_space(8.0);
+                        self.render_shortcut_row(ui, "⌘+Shift+C", "Column Manager");
+                        self.render_shortcut_row(ui, "⌘+Z", "Undo Column Action");
+                        self.render_shortcut_row(ui, "⌘+Shift+Z", "Redo Column Action");
+                        ui.add_space(16.0);
+
+                        // General
+                        ui.label(
+                            egui::RichText::new("General")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(200, 200, 200)),
+                        );
+                        ui.add_space(8.0);
+                        self.render_shortcut_row(ui, "Esc", "Close Dialog/Popup");
+                    });
+                });
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            // Close button
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(format!("{} Close", egui_phosphor::regular::X))
+                        .clicked()
+                    {
+                        should_close = true;
+                    }
+                });
+            });
+            ui.add_space(10.0);
+        });
+
+        if should_close {
+            self.shortcuts_dialog_open = false;
+        }
+    }
+
+    /// Render a single shortcut row
+    fn render_shortcut_row(&self, ui: &mut egui::Ui, shortcut: &str, description: &str) {
+        ui.horizontal(|ui| {
+            // Description on the left - fixed width column
+            ui.set_width(280.0);
+            ui.label(egui::RichText::new(description).color(Color32::from_rgb(220, 220, 220)));
+
+            // Shortcut key badge on the right
+            egui::Frame::NONE
+                .fill(Color32::from_rgb(35, 35, 40))
+                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(55, 55, 60)))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(10, 5))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(shortcut)
+                            .size(12.0)
+                            .color(Color32::from_rgb(200, 200, 200)),
+                    );
+                });
+        });
+        ui.add_space(6.0);
+    }
+
     /// Render the Column Manager dialog
     fn render_column_manager(&mut self, ctx: &egui::Context) {
         self.ensure_tabs();
@@ -3319,6 +3471,10 @@ impl eframe::App for FastCsvApp {
                 if i.modifiers.command && i.key_pressed(Key::T) {
                     actions.push("new_tab");
                 }
+                // Cmd+W to close active tab
+                if i.modifiers.command && i.key_pressed(Key::W) {
+                    actions.push("close_tab");
+                }
             });
         }
         // Apply actions after dropping tab borrow
@@ -3327,6 +3483,7 @@ impl eframe::App for FastCsvApp {
                 "next_match" => self.next_match(),
                 "prev_match" => self.prev_match(),
                 "new_tab" => self.new_tab(),
+                "close_tab" => self.close_active_tab(),
                 _ => {}
             }
         }
@@ -3451,6 +3608,18 @@ impl eframe::App for FastCsvApp {
                             ctx.set_visuals(light);
                         }
                         ui.close();
+                    }
+                });
+                ui.menu_button("Help", |ui: &mut egui::Ui| {
+                    if ui
+                        .button(format!(
+                            "{} Keyboard Shortcuts",
+                            egui_phosphor::regular::KEYBOARD
+                        ))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.shortcuts_dialog_open = true;
                     }
                 });
             });
@@ -3764,6 +3933,9 @@ impl eframe::App for FastCsvApp {
 
         // Render Filter popup (if open)
         self.render_filter_popup(ctx);
+
+        // Render Keyboard Shortcuts dialog (if open)
+        self.render_shortcuts_dialog(ctx);
 
         // Handle dropped files
         #[cfg(target_arch = "wasm32")]
