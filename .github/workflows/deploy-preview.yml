@@ -2,14 +2,6 @@ name: Deploy Web Preview
 
 on:
   push:
-    branches-ignore:
-      - main
-      - master
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - '.cursorrules'
-  pull_request:
     branches:
       - main
       - master
@@ -50,11 +42,7 @@ jobs:
       - name: Determine deployment message
         id: deploy
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "message=Preview: PR #${{ github.event.pull_request.number }} (${{ github.head_ref }})" >> $GITHUB_OUTPUT
-          else
-            echo "message=Preview: ${{ github.ref_name }} (${{ github.sha }})" >> $GITHUB_OUTPUT
-          fi
+          echo "message=Preview: ${{ github.ref_name }} (${{ github.sha }})" >> $GITHUB_OUTPUT
       
       - name: Deploy to GitHub Pages Preview
         uses: peaceiris/actions-gh-pages@v3
