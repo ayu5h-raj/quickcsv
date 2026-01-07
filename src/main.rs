@@ -4124,7 +4124,8 @@ fn main() {
 
 #[cfg(test)]
 mod search_tests {
-    use crate::state::{SearchResults, SearchState, SearchStatus};
+    use crate::state::search::SearchResults;
+    use crate::state::{SearchState, SearchStatus};
 
     /// Test that search query matching works correctly
     #[test]
