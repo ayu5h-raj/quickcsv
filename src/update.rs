@@ -10,6 +10,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 /// Current version from Cargo.toml
 #[allow(dead_code)]
@@ -25,6 +27,13 @@ pub struct UpdateState {
     pub dismissed: bool,
     /// Whether check has been initiated
     pub check_initiated: bool,
+    /// Status message for manual checks (e.g., "Checking...", "Up to date!")
+    pub status_message: Arc<RwLock<Option<String>>>,
+    /// Timestamp when status message was set (for auto-clearing after 5 seconds)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub status_message_time: Arc<RwLock<Option<Instant>>>,
+    #[cfg(target_arch = "wasm32")]
+    pub status_message_time: Arc<RwLock<Option<()>>>, // Dummy type for WASM
 }
 
 impl Default for UpdateState {
@@ -34,18 +43,36 @@ impl Default for UpdateState {
             update_available: Arc::new(AtomicBool::new(false)),
             dismissed: false,
             check_initiated: false,
+            status_message: Arc::new(RwLock::new(None)),
+            #[cfg(not(target_arch = "wasm32"))]
+            status_message_time: Arc::new(RwLock::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            status_message_time: Arc::new(RwLock::new(None)),
         }
     }
 }
 
 /// Check for updates from GitHub releases (runs in background thread)
-/// Check for updates from GitHub releases (runs in background thread)
+/// If `manual` is true, always checks and clears the dismissed flag
 #[cfg(not(target_arch = "wasm32"))]
 pub fn check_for_updates(
     latest_version: Arc<RwLock<Option<String>>>,
     update_available: Arc<AtomicBool>,
+    status_message: Arc<RwLock<Option<String>>>,
+    status_message_time: Arc<RwLock<Option<Instant>>>,
     ctx: egui::Context,
+    manual: bool,
 ) {
+    // If manual check, clear the update available flag first to force re-check
+    if manual {
+        update_available.store(false, Ordering::SeqCst);
+        *status_message.write() = Some("Checking for updates...".to_string());
+        *status_message_time.write() = Some(Instant::now());
+        ctx.request_repaint();
+    }
+
+    let status_msg_clone = Arc::clone(&status_message);
+    let status_time_clone = Arc::clone(&status_message_time);
     thread::spawn(move || {
         // Call GitHub API to get latest release
         let url = "https://api.github.com/repos/ayu5h-raj/quickcsv/releases/latest";
@@ -66,13 +93,28 @@ pub fn check_for_updates(
                         {
                             *latest_version.write() = Some(version.to_string());
                             update_available.store(true, Ordering::SeqCst);
+                            if manual {
+                                *status_msg_clone.write() = None; // Clear status, banner will show
+                                *status_time_clone.write() = None;
+                            }
+                            ctx.request_repaint();
+                        } else if manual {
+                            // For manual checks, show "up to date" message
+                            *status_msg_clone.write() =
+                                Some(format!("You're up to date! (v{})", CURRENT_VERSION));
+                            *status_time_clone.write() = Some(Instant::now());
                             ctx.request_repaint();
                         }
                     }
                 }
             }
+        } else if manual {
+            // Show error message for manual checks
+            *status_msg_clone.write() = Some("Failed to check for updates".to_string());
+            *status_time_clone.write() = Some(Instant::now());
+            ctx.request_repaint();
         }
-        // Silently fail if update check fails
+        // Silently fail if update check fails (for automatic checks)
     });
 }
 
@@ -81,7 +123,10 @@ pub fn check_for_updates(
 pub fn check_for_updates(
     _latest_version: Arc<RwLock<Option<String>>>,
     _update_available: Arc<AtomicBool>,
+    _status_message: Arc<RwLock<Option<String>>>,
+    _status_message_time: Arc<RwLock<Option<()>>>,
     _ctx: egui::Context,
+    _manual: bool,
 ) {
     // No-op for WASM
 }

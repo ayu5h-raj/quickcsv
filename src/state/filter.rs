@@ -1,9 +1,10 @@
 //! Filter state management for column filtering
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Filter operators for column filtering
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FilterOperator {
     #[default]
     Contains,
@@ -47,7 +48,7 @@ impl FilterOperator {
 }
 
 /// A filter condition for a column
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FilterCondition {
     pub operator: FilterOperator,
     pub value: String,
@@ -102,6 +103,8 @@ pub struct FilterState {
     pub selected_operator: FilterOperator,
     /// Whether to focus the input field when popup opens
     pub focus_input: bool,
+    /// Whether the filter manager dialog is open
+    pub manager_open: bool,
 }
 
 impl FilterState {
@@ -173,6 +176,20 @@ impl FilterState {
         self.active_popup = None;
         self.filter_input.clear();
         self.focus_input = false;
+    }
+
+    /// Get filters for serialization (only the filters map, not UI state)
+    /// Note: Currently unused (persistence removed), but kept for potential future use
+    #[allow(dead_code)]
+    pub fn get_filters_for_save(&self) -> &HashMap<usize, FilterCondition> {
+        &self.filters
+    }
+
+    /// Restore filters from serialized data
+    /// Note: Currently unused (persistence removed), but kept for potential future use
+    #[allow(dead_code)]
+    pub fn restore_filters(&mut self, filters: HashMap<usize, FilterCondition>) {
+        self.filters = filters;
     }
 }
 
@@ -341,5 +358,195 @@ mod tests {
 
         // Missing column treated as empty, Empty filter should match
         assert!(state.row_matches(&row));
+    }
+
+    #[test]
+    fn test_clear_all_filters() {
+        let mut state = FilterState::default();
+
+        // Add multiple filters
+        state.apply_filter(0, FilterOperator::Contains, "test".to_string());
+        state.apply_filter(1, FilterOperator::Equals, "value".to_string());
+        state.apply_filter(2, FilterOperator::GreaterThan, "100".to_string());
+
+        assert!(state.has_active_filters());
+        assert_eq!(state.filters.len(), 3);
+
+        // Clear all filters
+        state.clear();
+
+        assert!(!state.has_active_filters());
+        assert_eq!(state.filters.len(), 0);
+        assert!(state.active_popup.is_none());
+        assert!(state.filter_input.is_empty());
+    }
+
+    #[test]
+    fn test_get_filters_for_save() {
+        let mut state = FilterState::default();
+        state.apply_filter(0, FilterOperator::Contains, "test".to_string());
+        state.apply_filter(1, FilterOperator::Equals, "value".to_string());
+
+        let filters = state.get_filters_for_save();
+
+        assert_eq!(filters.len(), 2);
+        assert!(filters.contains_key(&0));
+        assert!(filters.contains_key(&1));
+
+        // Verify filter conditions
+        let filter_0 = filters.get(&0).unwrap();
+        assert_eq!(filter_0.operator, FilterOperator::Contains);
+        assert_eq!(filter_0.value, "test");
+
+        let filter_1 = filters.get(&1).unwrap();
+        assert_eq!(filter_1.operator, FilterOperator::Equals);
+        assert_eq!(filter_1.value, "value");
+    }
+
+    #[test]
+    fn test_restore_filters() {
+        let mut state = FilterState::default();
+
+        // Create filters map to restore
+        let mut filters = HashMap::new();
+        filters.insert(
+            0,
+            FilterCondition {
+                operator: FilterOperator::Contains,
+                value: "restored".to_string(),
+            },
+        );
+        filters.insert(
+            1,
+            FilterCondition {
+                operator: FilterOperator::StartsWith,
+                value: "prefix".to_string(),
+            },
+        );
+
+        // Restore filters
+        state.restore_filters(filters.clone());
+
+        assert!(state.has_active_filters());
+        assert_eq!(state.filters.len(), 2);
+
+        // Verify restored filters
+        assert_eq!(
+            state.filters.get(&0).unwrap().operator,
+            FilterOperator::Contains
+        );
+        assert_eq!(state.filters.get(&0).unwrap().value, "restored");
+        assert_eq!(
+            state.filters.get(&1).unwrap().operator,
+            FilterOperator::StartsWith
+        );
+        assert_eq!(state.filters.get(&1).unwrap().value, "prefix");
+    }
+
+    #[test]
+    fn test_restore_filters_overwrites_existing() {
+        let mut state = FilterState::default();
+
+        // Add initial filter
+        state.apply_filter(0, FilterOperator::Contains, "old".to_string());
+        assert_eq!(state.filters.len(), 1);
+
+        // Restore with new filters
+        let mut new_filters = HashMap::new();
+        new_filters.insert(
+            1,
+            FilterCondition {
+                operator: FilterOperator::Equals,
+                value: "new".to_string(),
+            },
+        );
+
+        state.restore_filters(new_filters);
+
+        // Old filter should be gone, new one should be present
+        assert_eq!(state.filters.len(), 1);
+        assert!(!state.filters.contains_key(&0));
+        assert!(state.filters.contains_key(&1));
+    }
+
+    #[test]
+    fn test_filter_serialization_roundtrip() {
+        use serde_json;
+
+        // Create filter state with multiple filters
+        let mut original_state = FilterState::default();
+        original_state.apply_filter(0, FilterOperator::Contains, "test".to_string());
+        original_state.apply_filter(1, FilterOperator::GreaterThan, "100".to_string());
+        original_state.apply_filter(2, FilterOperator::Empty, String::new());
+
+        // Serialize
+        let filters_to_save = original_state.get_filters_for_save();
+        let json = serde_json::to_string(filters_to_save).expect("Serialization should succeed");
+
+        // Deserialize
+        let restored_filters: HashMap<usize, FilterCondition> =
+            serde_json::from_str(&json).expect("Deserialization should succeed");
+
+        // Restore to new state
+        let mut restored_state = FilterState::default();
+        restored_state.restore_filters(restored_filters);
+
+        // Verify all filters match
+        assert_eq!(original_state.filters.len(), restored_state.filters.len());
+        for (col_idx, condition) in &original_state.filters {
+            let restored_condition = restored_state.filters.get(col_idx);
+            assert!(
+                restored_condition.is_some(),
+                "Filter for column {} should be restored",
+                col_idx
+            );
+            assert_eq!(
+                restored_condition.unwrap().operator,
+                condition.operator,
+                "Operator should match for column {}",
+                col_idx
+            );
+            assert_eq!(
+                restored_condition.unwrap().value,
+                condition.value,
+                "Value should match for column {}",
+                col_idx
+            );
+        }
+    }
+
+    #[test]
+    fn test_clear_all_preserves_ui_state() {
+        let mut state = FilterState::default();
+        state.apply_filter(0, FilterOperator::Contains, "test".to_string());
+        state.active_popup = Some(0);
+        state.filter_input = "input".to_string();
+        state.selected_operator = FilterOperator::Equals;
+        state.focus_input = true;
+
+        // Clear should reset UI state
+        state.clear();
+
+        assert!(state.active_popup.is_none());
+        assert!(state.filter_input.is_empty());
+        // Note: selected_operator and focus_input are not reset by clear()
+        // This is intentional - they're UI state, not filter state
+    }
+
+    #[test]
+    fn test_has_filter() {
+        let mut state = FilterState::default();
+
+        assert!(!state.has_filter(0));
+        assert!(!state.has_filter(1));
+
+        state.apply_filter(0, FilterOperator::Contains, "test".to_string());
+
+        assert!(state.has_filter(0));
+        assert!(!state.has_filter(1));
+
+        state.clear_filter(0);
+
+        assert!(!state.has_filter(0));
     }
 }
