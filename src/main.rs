@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
@@ -24,12 +26,12 @@ use wasm_bindgen::JsCast;
 #[cfg(not(target_arch = "wasm32"))]
 use csv::init_csv_progressive;
 use state::{
-    ColumnState, FilterOperator, FilterState, LoadState, SearchStatus, SortDirection, SortState,
-    TabState, MAX_NAV_ROWS,
+    ColumnState, FilterCondition, FilterOperator, FilterState, LoadState, SearchStatus,
+    SortDirection, SortState, TabState, MAX_NAV_ROWS,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use update::check_for_updates;
-use update::UpdateState;
+use update::{UpdateState, CURRENT_VERSION};
 use utils::{format_file_size, format_json, format_number, looks_like_json, truncate_for_display};
 
 #[cfg(target_arch = "wasm32")]
@@ -427,9 +429,12 @@ impl FastCsvApp {
         tab.sort_state = SortState::default();
         // Reset column state (visibility, order)
         tab.column_state = ColumnState::default();
-        // Reset filter state
+        // Reset filter state (no persistence - filters are session-only)
         tab.filter_state = FilterState::default();
         tab.filtered_indices = None;
+
+        // Get path string for file info
+        let path_str = path.to_string_lossy().to_string();
         tab.filter_version = 0;
         tab.last_filter_version = 0;
         tab.filter_receiver = None;
@@ -464,7 +469,6 @@ impl FastCsvApp {
 
         let state = Arc::clone(&tab.state);
         let path_clone = path.clone();
-        let path_str = path.to_string_lossy().to_string();
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -2227,58 +2231,80 @@ impl FastCsvApp {
         let tab = &self.tabs[self.active_tab_index];
         let state = tab.state.read();
 
-        ui.horizontal(|ui| match state.load_state {
-            LoadState::Empty => {
-                ui.label("No file loaded");
-            }
-            LoadState::Indexing => {
-                let rows = state.rows_indexed.load(Ordering::Relaxed);
-                ui.spinner();
-                ui.label(format!("Indexing... {} rows", format_number(rows)));
-            }
-            LoadState::Ready => {
-                if let Some(csv) = &state.csv {
-                    let row_count = csv.indexed_row_count();
-                    let is_still_indexing = !state.indexing_complete.load(Ordering::Relaxed);
-                    let is_filtering = tab.is_filtering.load(Ordering::Relaxed);
+        ui.horizontal(|ui| {
+            match state.load_state {
+                LoadState::Empty => {
+                    ui.label("No file loaded");
+                }
+                LoadState::Indexing => {
+                    let rows = state.rows_indexed.load(Ordering::Relaxed);
+                    ui.spinner();
+                    ui.label(format!("Indexing... {} rows", format_number(rows)));
+                }
+                LoadState::Ready => {
+                    if let Some(csv) = &state.csv {
+                        let row_count = csv.indexed_row_count();
+                        let is_still_indexing = !state.indexing_complete.load(Ordering::Relaxed);
+                        let is_filtering = tab.is_filtering.load(Ordering::Relaxed);
 
-                    if is_still_indexing {
-                        ui.spinner();
-                        ui.label(format!("Rows: {}...", format_number(row_count)));
-                    } else if is_filtering {
-                        ui.spinner();
-                        ui.label(format!("Filtering... (Rows: {})", format_number(row_count)));
-                    } else if let Some(filtered) = &tab.filtered_indices {
-                        let duration_text = if let Some(d) = tab.filter_duration {
-                            format!(" • {:.2}s", d.as_secs_f64())
+                        if is_still_indexing {
+                            ui.spinner();
+                            ui.label(format!("Rows: {}...", format_number(row_count)));
+                        } else if is_filtering {
+                            ui.spinner();
+                            ui.label(format!("Filtering... (Rows: {})", format_number(row_count)));
+                        } else if let Some(filtered) = &tab.filtered_indices {
+                            let duration_text = if let Some(d) = tab.filter_duration {
+                                format!(" • {:.2}s", d.as_secs_f64())
+                            } else {
+                                String::new()
+                            };
+                            ui.label(format!(
+                                "Rows: {} (of {}){}",
+                                format_number(filtered.len()),
+                                format_number(row_count),
+                                duration_text
+                            ))
+                            .on_hover_text("Number of rows matching active filters");
                         } else {
-                            String::new()
-                        };
-                        ui.label(format!(
-                            "Rows: {} (of {}){}",
-                            format_number(filtered.len()),
-                            format_number(row_count),
-                            duration_text
-                        ))
-                        .on_hover_text("Number of rows matching active filters");
-                    } else {
-                        ui.label(format!("Rows: {}", format_number(row_count)));
+                            ui.label(format!("Rows: {}", format_number(row_count)));
+                        }
+                        ui.separator();
+                        ui.label(format!("Columns: {}", csv.headers.len()));
+                        ui.separator();
+                        ui.label(format!("Delimiter: {}", csv.delimiter_name()));
+                        ui.separator();
+                        ui.label(format!("Size: {}", format_file_size(csv.file_size)));
+                        ui.separator();
+                        ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
                     }
-                    ui.separator();
-                    ui.label(format!("Columns: {}", csv.headers.len()));
-                    ui.separator();
-                    ui.label(format!("Delimiter: {}", csv.delimiter_name()));
-                    ui.separator();
-                    ui.label(format!("Size: {}", format_file_size(csv.file_size)));
-                    ui.separator();
-                    ui.label(csv.path.file_name().unwrap_or_default().to_string_lossy());
+                }
+                LoadState::Error => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        state.error_message.as_deref().unwrap_or("Unknown error"),
+                    );
                 }
             }
-            LoadState::Error => {
-                ui.colored_label(
-                    egui::Color32::RED,
-                    state.error_message.as_deref().unwrap_or("Unknown error"),
-                );
+
+            // Show update check status message on the right
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let status_msg = self.update_state.status_message.read();
+                if let Some(msg) = status_msg.as_ref() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.separator();
+                        if msg.contains("Checking") {
+                            ui.spinner();
+                        } else if msg.contains("up to date") {
+                            ui.colored_label(egui::Color32::from_rgb(100, 200, 100), msg);
+                        } else if msg.contains("Failed") {
+                            ui.colored_label(egui::Color32::RED, msg);
+                        } else {
+                            ui.label(msg);
+                        }
+                    });
+                }
             }
         });
     }
@@ -3089,6 +3115,7 @@ impl FastCsvApp {
                         );
                         ui.add_space(8.0);
                         self.render_shortcut_row(ui, "⌘+Shift+C", "Column Manager");
+                        self.render_shortcut_row(ui, "⌘+Shift+F", "Filter Manager");
                         self.render_shortcut_row(ui, "⌘+Z", "Undo Column Action");
                         self.render_shortcut_row(ui, "⌘+Shift+Z", "Redo Column Action");
                         ui.add_space(16.0);
@@ -3365,6 +3392,251 @@ impl FastCsvApp {
             tab.column_state.manager_open = false;
         }
     }
+
+    /// Render the Filter Manager dialog
+    fn render_filter_manager(&mut self, ctx: &egui::Context) {
+        self.ensure_tabs();
+        let tab = self.active_tab_mut();
+
+        if !tab.filter_state.manager_open {
+            return;
+        }
+
+        // Handle Escape to close
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            tab.filter_state.manager_open = false;
+            return;
+        }
+
+        // Get headers from state
+        let headers = {
+            let state = tab.state.read();
+            state
+                .csv
+                .as_ref()
+                .map(|c| c.headers.clone())
+                .unwrap_or_default()
+        };
+
+        if headers.is_empty() {
+            tab.filter_state.manager_open = false;
+            return;
+        }
+
+        let mut should_close = false;
+        let mut clear_all = false;
+        let mut edit_filter: Option<usize> = None;
+        let mut remove_filter: Option<usize> = None;
+
+        // Get filtered row count for display
+        let filtered_count = tab.filtered_indices.as_ref().map(|v| v.len()).unwrap_or(0);
+        let total_count = tab.total_row_count;
+
+        egui::Window::new(format!(
+            "{} Filter Manager",
+            egui_phosphor::regular::FUNNEL_SIMPLE
+        ))
+        .default_size([500.0, 400.0])
+        .resizable(true)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.add_space(12.0);
+
+            // Show filter summary
+            if tab.filter_state.has_active_filters() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} Active filters: {}",
+                            egui_phosphor::regular::FUNNEL_SIMPLE,
+                            tab.filter_state.filters.len()
+                        ))
+                        .color(Color32::from_rgb(100, 180, 255)),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Showing {} of {} rows",
+                        format_number(filtered_count),
+                        format_number(total_count)
+                    ))
+                    .small()
+                    .color(Color32::from_rgb(200, 200, 200)),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("No active filters")
+                        .color(Color32::from_rgb(150, 150, 150)),
+                );
+            }
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            // Filter list
+            if tab.filter_state.has_active_filters() {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(250.0)
+                    .show(ui, |ui| {
+                        // Sort filters by column index for consistent display
+                        let mut filter_entries: Vec<(usize, &FilterCondition)> = tab
+                            .filter_state
+                            .filters
+                            .iter()
+                            .map(|(k, v)| (*k, v))
+                            .collect();
+                        filter_entries.sort_by_key(|(idx, _)| *idx);
+
+                        for (col_idx, condition) in filter_entries {
+                            if col_idx >= headers.len() {
+                                continue;
+                            }
+
+                            let col_name = &headers[col_idx];
+                            let value_display = if condition.value.is_empty() {
+                                String::new()
+                            } else if condition.value.len() > 40 {
+                                format!("{}...", &condition.value[..40])
+                            } else {
+                                condition.value.clone()
+                            };
+
+                            ui.horizontal(|ui| {
+                                // Column name
+                                ui.label(
+                                    egui::RichText::new(col_name)
+                                        .color(Color32::from_rgb(200, 200, 200)),
+                                );
+                                ui.add_space(8.0);
+
+                                // Operator
+                                ui.label(
+                                    egui::RichText::new(condition.operator.display_name())
+                                        .color(Color32::from_rgb(150, 150, 150))
+                                        .small(),
+                                );
+                                ui.add_space(8.0);
+
+                                // Value
+                                if !value_display.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(format!("\"{value_display}\""))
+                                            .color(Color32::from_rgb(180, 180, 180)),
+                                    );
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        // Remove button
+                                        if ui
+                                            .button(egui_phosphor::regular::TRASH.to_string())
+                                            .on_hover_text("Remove filter")
+                                            .clicked()
+                                        {
+                                            remove_filter = Some(col_idx);
+                                        }
+                                        ui.add_space(4.0);
+                                        // Edit button
+                                        if ui
+                                            .button(egui_phosphor::regular::PENCIL.to_string())
+                                            .on_hover_text("Edit filter")
+                                            .clicked()
+                                        {
+                                            edit_filter = Some(col_idx);
+                                        }
+                                    },
+                                );
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+            } else {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.label(
+                        egui::RichText::new(egui_phosphor::regular::FUNNEL_SIMPLE.to_string())
+                            .size(48.0)
+                            .color(Color32::from_rgb(100, 100, 100)),
+                    );
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new("No filters applied")
+                            .color(Color32::from_rgb(150, 150, 150)),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Click the filter icon in column headers to add filters",
+                        )
+                        .small()
+                        .color(Color32::from_rgb(120, 120, 120)),
+                    );
+                });
+            }
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            // Action buttons
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Close button
+                    if ui
+                        .button(format!("{} Close", egui_phosphor::regular::X))
+                        .clicked()
+                    {
+                        should_close = true;
+                    }
+                    // Clear All button (only if filters exist)
+                    if tab.filter_state.has_active_filters() {
+                        ui.add_space(8.0);
+                        if ui
+                            .add(
+                                egui::Button::new(format!(
+                                    "{} Clear All Filters",
+                                    egui_phosphor::regular::TRASH
+                                ))
+                                .fill(Color32::from_rgb(180, 60, 60)),
+                            )
+                            .clicked()
+                        {
+                            clear_all = true;
+                        }
+                    }
+                });
+            });
+            ui.add_space(10.0);
+        });
+
+        // Handle actions after UI (drop tab borrow first)
+        let should_mark_changed = clear_all || remove_filter.is_some();
+        let edit_col = edit_filter;
+        let remove_col = remove_filter;
+
+        if clear_all {
+            tab.filter_state.clear();
+        }
+        if let Some(col_idx) = remove_col {
+            tab.filter_state.clear_filter(col_idx);
+        }
+        if let Some(col_idx) = edit_col {
+            tab.filter_state.open_popup(col_idx);
+            tab.filter_state.manager_open = false; // Close manager, open filter popup
+        }
+        if should_close {
+            tab.filter_state.manager_open = false;
+        }
+
+        // Mark filter changed (tab borrow is dropped at end of function)
+        if should_mark_changed {
+            self.mark_filter_changed();
+        }
+    }
 }
 
 impl eframe::App for FastCsvApp {
@@ -3381,12 +3653,49 @@ impl eframe::App for FastCsvApp {
         // Check for updates on startup (only once)
         if !self.update_state.check_initiated {
             self.update_state.check_initiated = true;
+
+            // Reset dismissed flag if app version has changed
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if let Some(storage) =
+                    ctx.data(|d| d.get_temp::<String>(egui::Id::new("quickcsv_last_version")))
+                {
+                    if storage != CURRENT_VERSION {
+                        // Version changed - reset dismissed flag so banner can show again
+                        self.update_state.dismissed = false;
+                    }
+                }
+                // Store current version for next time
+                ctx.data_mut(|d| {
+                    d.insert_temp(
+                        egui::Id::new("quickcsv_last_version"),
+                        CURRENT_VERSION.to_string(),
+                    );
+                });
+            }
+
             #[cfg(not(target_arch = "wasm32"))]
             check_for_updates(
                 Arc::clone(&self.update_state.latest_version),
                 Arc::clone(&self.update_state.update_available),
+                Arc::clone(&self.update_state.status_message),
+                Arc::clone(&self.update_state.status_message_time),
                 ctx.clone(),
+                false, // Automatic check
             );
+        }
+
+        // Auto-clear status message after 5 seconds
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let status_time = self.update_state.status_message_time.read();
+            if let Some(time) = status_time.as_ref() {
+                if time.elapsed() > Duration::from_secs(5) {
+                    drop(status_time);
+                    *self.update_state.status_message.write() = None;
+                    *self.update_state.status_message_time.write() = None;
+                }
+            }
         }
 
         self.ensure_tabs();
@@ -3458,6 +3767,10 @@ impl eframe::App for FastCsvApp {
                 // Cmd+Shift+C to open Column Manager
                 if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::C) {
                     tab.column_state.manager_open = true;
+                }
+                // Cmd+Shift+F to open Filter Manager
+                if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::F) {
+                    tab.filter_state.manager_open = true;
                 }
                 // Cmd+Z for undo column actions
                 if i.modifiers.command && i.key_pressed(Key::Z) && !i.modifiers.shift {
@@ -3588,6 +3901,10 @@ impl eframe::App for FastCsvApp {
                         ui.close();
                         tab.column_state.manager_open = true;
                     }
+                    if ui.button("Filter Manager... (⌘+Shift+F)").clicked() {
+                        ui.close();
+                        tab.filter_state.manager_open = true;
+                    }
                     ui.separator();
                     let theme_label = if self.dark_mode {
                         "☀ Light Mode"
@@ -3620,6 +3937,30 @@ impl eframe::App for FastCsvApp {
                     {
                         ui.close();
                         self.shortcuts_dialog_open = true;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.separator();
+                        if ui
+                            .button(format!(
+                                "{} Check for Updates",
+                                egui_phosphor::regular::ARROW_CLOCKWISE
+                            ))
+                            .clicked()
+                        {
+                            ui.close();
+                            // Reset dismissed flag so banner shows if update found
+                            self.update_state.dismissed = false;
+                            // Trigger manual update check
+                            check_for_updates(
+                                Arc::clone(&self.update_state.latest_version),
+                                Arc::clone(&self.update_state.update_available),
+                                Arc::clone(&self.update_state.status_message),
+                                Arc::clone(&self.update_state.status_message_time),
+                                ctx.clone(),
+                                true, // Manual check
+                            );
+                        }
                     }
                 });
             });
@@ -3661,9 +4002,11 @@ impl eframe::App for FastCsvApp {
                                 ui.add_space(10.0);
                                 let version = self.update_state.latest_version.read();
                                 let version_str = version.as_deref().unwrap_or("new version");
+                                // Use the same pattern as sort indicators - icon with space in format string
                                 ui.label(
                                     egui::RichText::new(format!(
-                                        "⬆ Update available: v{version_str}"
+                                        " {} Update available: v{version_str}",
+                                        egui_phosphor::regular::ARROW_UP
                                     ))
                                     .color(Color32::WHITE),
                                 );
@@ -3930,6 +4273,9 @@ impl eframe::App for FastCsvApp {
 
         // Render Column Manager dialog (if open)
         self.render_column_manager(ctx);
+
+        // Render Filter Manager dialog (if open)
+        self.render_filter_manager(ctx);
 
         // Render Filter popup (if open)
         self.render_filter_popup(ctx);
