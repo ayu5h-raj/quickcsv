@@ -87,8 +87,8 @@
     <!-- Trunk Rust/WASM loader - MUST be before any script tags -->
     
 <script type="module">
-import init, * as bindings from '/quickcsv/quickcsv-3b6f58a4485f7e4c.js';
-const wasm = await init({ module_or_path: '/quickcsv/quickcsv-3b6f58a4485f7e4c_bg.wasm' });
+import init, * as bindings from '/quickcsv/quickcsv-9722e2c73306f2bd.js';
+const wasm = await init({ module_or_path: '/quickcsv/quickcsv-9722e2c73306f2bd_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -137,7 +137,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
             }
         });
     </script>
-<link rel="modulepreload" href="/quickcsv/quickcsv-3b6f58a4485f7e4c.js" crossorigin="anonymous" integrity="sha384-me28DYtem9gDBeORDEcWN+5H1TMGribSOnzgu4tJZVdtk38NHmxUWPxQMndwzvIt"><link rel="preload" href="/quickcsv/quickcsv-3b6f58a4485f7e4c_bg.wasm" crossorigin="anonymous" integrity="sha384-02nu94ue1FnhO6gof6l4IvWkbkadSW52tnx5XVUO5UUD1vA3oWyUI+NVIxcvZAhM" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/quickcsv/quickcsv-9722e2c73306f2bd.js" crossorigin="anonymous" integrity="sha384-PiNZjzai+av5EPZoA14tiDV958v7/HR61AWLhMnXATw/2L8+dD4/CbgiBD0IW7eA"><link rel="preload" href="/quickcsv/quickcsv-9722e2c73306f2bd_bg.wasm" crossorigin="anonymous" integrity="sha384-pFkv3ZljQaxr11KbnqYXXaEnLTNFhxSuz3lpo2Be5Cfnkq6PxB/oITLl+UUaq/BZ" as="fetch" type="application/wasm"></head>
 
 <body>
     <!-- The WASM code will reside here: -->
