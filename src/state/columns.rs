@@ -38,6 +38,7 @@ impl ColumnState {
     pub fn init_column_order(&mut self, num_columns: usize) {
         if self.column_order.len() != num_columns {
             self.column_order = (0..num_columns).collect();
+            self.hidden_columns.clear(); // Reset hidden columns when switching files
         }
     }
 
@@ -286,5 +287,270 @@ impl ColumnState {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_init_column_order() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        assert_eq!(state.column_order, vec![0, 1, 2, 3, 4]);
+        assert_eq!(state.hidden_columns.len(), 0);
+    }
+
+    #[test]
+    fn test_init_column_order_clears_hidden_columns() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        // Hide some columns
+        state.hide_column(1);
+        state.hide_column(3);
+        assert_eq!(state.hidden_columns.len(), 2);
+
+        // Initialize with different column count - should clear hidden columns
+        state.init_column_order(3);
+        assert_eq!(state.column_order, vec![0, 1, 2]);
+        assert_eq!(
+            state.hidden_columns.len(),
+            0,
+            "Hidden columns should be cleared when column count changes"
+        );
+    }
+
+    #[test]
+    fn test_init_column_order_preserves_state_if_same_count() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+        state.hide_column(1);
+        state.hide_column(3);
+
+        // Initialize with same column count - should preserve hidden columns
+        state.init_column_order(5);
+        assert_eq!(state.column_order, vec![0, 1, 2, 3, 4]);
+        assert_eq!(
+            state.hidden_columns.len(),
+            2,
+            "Hidden columns should be preserved when column count stays the same"
+        );
+    }
+
+    #[test]
+    fn test_hide_column() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        state.hide_column(2);
+        assert!(state.hidden_columns.contains(&2));
+        assert_eq!(state.get_visible_columns(), vec![0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn test_show_column() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+        state.hide_column(2);
+
+        state.show_column(2);
+        assert!(!state.hidden_columns.contains(&2));
+        assert_eq!(state.get_visible_columns(), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_cannot_hide_all_columns() {
+        let mut state = ColumnState::default();
+        state.init_column_order(3);
+
+        state.hide_column(0);
+        state.hide_column(1);
+        // Try to hide the last column - should fail
+        state.hide_column(2);
+
+        // At least one column must remain visible
+        assert_eq!(
+            state.get_visible_columns().len(),
+            1,
+            "Cannot hide all columns - at least one must remain visible"
+        );
+    }
+
+    #[test]
+    fn test_toggle_column() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        // Toggle to hide
+        state.toggle_column(2);
+        assert!(state.hidden_columns.contains(&2));
+
+        // Toggle to show
+        state.toggle_column(2);
+        assert!(!state.hidden_columns.contains(&2));
+    }
+
+    #[test]
+    fn test_get_visible_columns() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        state.hide_column(1);
+        state.hide_column(3);
+
+        let visible = state.get_visible_columns();
+        assert_eq!(visible, vec![0, 2, 4]);
+        assert!(!visible.contains(&1));
+        assert!(!visible.contains(&3));
+    }
+
+    #[test]
+    fn test_show_all_columns() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        state.hide_column(1);
+        state.hide_column(2);
+        state.hide_column(3);
+
+        state.show_all_columns();
+        assert_eq!(state.hidden_columns.len(), 0);
+        assert_eq!(state.get_visible_columns(), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_hide_all_columns() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        state.hide_all_columns();
+        // Should hide all except the first visible one
+        assert_eq!(state.get_visible_columns().len(), 1);
+    }
+
+    #[test]
+    fn test_reorder_columns() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        // Move column at index 0 to index 2
+        state.reorder_columns(0, 2);
+        assert_eq!(state.column_order, vec![1, 2, 0, 3, 4]);
+    }
+
+    #[test]
+    fn test_reorder_visible_columns() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+        state.hide_column(2); // Hide middle column
+
+        // Visible columns are [0, 1, 3, 4] (indices into original)
+        // Move visible column 0 (original 0) to visible position 2 (before original 4)
+        state.reorder_visible_columns(0, 2);
+
+        let visible = state.get_visible_columns();
+        assert_eq!(visible[2], 0, "Column 0 should be at visible position 2");
+    }
+
+    #[test]
+    fn test_undo_hide_column() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        state.hide_column(2);
+        assert!(state.hidden_columns.contains(&2));
+
+        state.undo();
+        assert!(!state.hidden_columns.contains(&2));
+    }
+
+    #[test]
+    fn test_undo_show_column() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+        state.hide_column(2);
+
+        state.show_column(2);
+        assert!(!state.hidden_columns.contains(&2));
+
+        state.undo();
+        assert!(state.hidden_columns.contains(&2));
+    }
+
+    #[test]
+    fn test_redo_hide_column() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        state.hide_column(2);
+        state.undo();
+        assert!(!state.hidden_columns.contains(&2));
+
+        state.redo();
+        assert!(state.hidden_columns.contains(&2));
+    }
+
+    #[test]
+    fn test_undo_redo_reorder() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        let original_order = state.column_order.clone();
+        state.reorder_columns(0, 2);
+        let reordered = state.column_order.clone();
+        assert_ne!(original_order, reordered);
+
+        state.undo();
+        assert_eq!(state.column_order, original_order);
+
+        state.redo();
+        assert_eq!(state.column_order, reordered);
+    }
+
+    #[test]
+    fn test_reset_column_order() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        state.reorder_columns(0, 2);
+        state.reorder_columns(1, 3);
+        assert_ne!(state.column_order, vec![0, 1, 2, 3, 4]);
+
+        state.reset_column_order();
+        assert_eq!(state.column_order, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_batch_undo_show_all() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        state.hide_column(1);
+        state.hide_column(2);
+        state.hide_column(3);
+
+        state.show_all_columns();
+        assert_eq!(state.hidden_columns.len(), 0);
+
+        // Undo the batch show all operation
+        state.undo();
+        assert_eq!(state.hidden_columns.len(), 3);
+    }
+
+    #[test]
+    fn test_batch_undo_hide_all() {
+        let mut state = ColumnState::default();
+        state.init_column_order(5);
+
+        state.hide_all_columns();
+        let num_hidden = state.hidden_columns.len();
+        assert!(num_hidden > 0);
+
+        // Undo the batch hide all operation
+        state.undo();
+        assert_eq!(state.hidden_columns.len(), 0);
     }
 }

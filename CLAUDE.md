@@ -27,6 +27,66 @@ QuickCSV is a high-performance CSV viewer for macOS built with Rust and egui.
 - Run `cargo clippy -- -D warnings` to check for warnings
 - Use inline format args: `format!("{value}")` not `format!("{}", value)`
 
+## Build Profiles
+
+The project has two release profiles optimized for different use cases:
+
+### Development: `release-fast` profile
+```bash
+cargo run --profile release-fast
+cargo build --profile release-fast
+```
+
+**Use this for:**
+- Local development and testing
+- Quick iteration when working on features
+- Performance testing during development
+
+**Features:**
+- Fast compile times (~50-60 seconds)
+- High optimization level (opt-level = 3)
+- Parallel compilation (codegen-units = 16)
+- No LTO for faster linking
+
+### Production: `release` profile
+```bash
+cargo build --release
+```
+
+**Use this for:**
+- Final releases and distribution
+- GitHub Actions CI/CD builds
+- Creating optimized binaries for users
+
+**Features:**
+- Slower compile times (~2-5 minutes)
+- Maximum optimization with Link-Time Optimization (LTO)
+- Single codegen unit for best cross-crate optimization
+- Smallest and fastest binary output
+
+**Note:** The `release` profile is automatically used by GitHub Actions for all releases. For local development, prefer `release-fast` for faster iteration.
+
+### Web/WASM Builds
+
+The project supports web builds using Trunk. Build settings are configured in `Trunk.toml`.
+
+**Development (fast iteration):**
+```bash
+trunk serve
+```
+- Uses `release-fast` profile for balanced speed (~30-60 seconds initial, ~10-20 seconds incremental)
+- High optimization (opt-level 3) but no LTO for faster compilation
+- Auto-reloads on file changes
+- Opens browser at http://127.0.0.1:8080
+
+**Production (optimized):**
+```bash
+trunk build --release
+```
+- Uses full release profile with LTO for maximum optimization
+- Slower build (~2-5 minutes) but smallest WASM output
+- Output in `dist/` directory
+
 ## Git Workflow
 
 1. Create feature branch: `feature/feature-name` or `fix/bug-name`

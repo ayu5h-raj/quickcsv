@@ -1717,8 +1717,15 @@ impl FastCsvApp {
             tab.column_state.init_column_order(num_columns);
 
             // Get visible columns in display order
-            let visible_columns = tab.column_state.get_visible_columns().clone();
-            let num_visible = visible_columns.len();
+            let mut visible_columns = tab.column_state.get_visible_columns().clone();
+            let mut num_visible = visible_columns.len();
+
+            // Safety: if all columns are hidden, show all columns
+            if num_visible == 0 {
+                tab.column_state.hidden_columns.clear();
+                visible_columns = tab.column_state.get_visible_columns().clone();
+                num_visible = visible_columns.len();
+            }
 
             // Ensure we have column widths for visible columns only
             if tab.column_widths.len() != num_visible {
@@ -1779,6 +1786,8 @@ impl FastCsvApp {
         let mut clicked_column: Option<usize> = None;
         let mut row_to_open_detail: Option<usize> = None;
         let mut drop_target_idx: Option<usize> = None;
+        let mut column_to_hide: Option<usize> = None;
+        let mut column_to_show: Option<usize> = None;
 
         // Wrap table in horizontal scroll area for wide tables
         egui::ScrollArea::horizontal()
@@ -1908,6 +1917,63 @@ impl FastCsvApp {
                                     let header_response = ui.add(
                                         egui::Label::new(text).sense(egui::Sense::click())
                                     );
+
+                                    // Right-click context menu for column header
+                                    // Extract hidden columns list before the closure to avoid borrow issues
+                                    let hidden_columns: Vec<usize> = tab
+                                        .column_state
+                                        .hidden_columns
+                                        .iter()
+                                        .copied()
+                                        .collect();
+                                    let headers_clone = headers.clone();
+
+                                    header_response.context_menu(|ui| {
+                                        // Hide column option
+                                        if ui
+                                            .button(format!(
+                                                "{} Hide Column",
+                                                egui_phosphor::regular::EYE_SLASH
+                                            ))
+                                            .clicked()
+                                        {
+                                            column_to_hide = Some(original_idx);
+                                            ui.close();
+                                        }
+
+                                        // Show columns submenu if there are hidden columns
+                                        if !hidden_columns.is_empty() {
+                                            ui.separator();
+                                            ui.menu_button(
+                                                format!(
+                                                    "{} Show Columns...",
+                                                    egui_phosphor::regular::EYE
+                                                ),
+                                                |ui| {
+                                                    // Sort hidden columns by original index for consistent ordering
+                                                    let mut sorted_hidden = hidden_columns.clone();
+                                                    sorted_hidden.sort();
+                                                    for &hidden_idx in &sorted_hidden {
+                                                        if hidden_idx >= headers_clone.len() {
+                                                            continue;
+                                                        }
+                                                        let hidden_header = &headers_clone[hidden_idx];
+                                                        if ui
+                                                            .button(format!(
+                                                                "{} {}",
+                                                                egui_phosphor::regular::EYE,
+                                                                hidden_header
+                                                            ))
+                                                            .clicked()
+                                                        {
+                                                            column_to_show = Some(hidden_idx);
+                                                            ui.close();
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        }
+                                    });
 
                                     // Get the full header area (handle + actual label rect) for drop detection
                                     let full_header_rect = drag_handle_rect.union(header_response.rect);
@@ -2185,6 +2251,18 @@ impl FastCsvApp {
         // Handle column header click for sorting
         if let Some(col_idx) = clicked_column {
             self.sort_by_column(col_idx, ui.ctx());
+        }
+
+        // Handle column hide/show from context menu
+        if let Some(col_idx) = column_to_hide {
+            self.ensure_tabs();
+            let tab = self.active_tab_mut();
+            tab.column_state.hide_column(col_idx);
+        }
+        if let Some(col_idx) = column_to_show {
+            self.ensure_tabs();
+            let tab = self.active_tab_mut();
+            tab.column_state.show_column(col_idx);
         }
 
         // Handle column drop for reordering
