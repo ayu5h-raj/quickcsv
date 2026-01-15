@@ -4039,6 +4039,26 @@ impl eframe::App for FastCsvApp {
                                 true, // Manual check
                             );
                         }
+                        if ui
+                            .button(format!(
+                                "{} Manual Update",
+                                egui_phosphor::regular::CLIPBOARD_TEXT
+                            ))
+                            .on_hover_text("Copy update command to clipboard")
+                            .clicked()
+                        {
+                            ui.close();
+                            // Copy the update command to clipboard
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                let _ = clipboard.set_text("brew update && brew upgrade --cask quickcsv");
+                            }
+                            // Show macOS notification to inform user
+                            let notify_script = "display notification \"Paste in Terminal to update QuickCSV\" with title \"QuickCSV\" subtitle \"Update command copied to clipboard\"";
+                            let _ = std::process::Command::new("osascript")
+                                .arg("-e")
+                                .arg(notify_script)
+                                .spawn();
+                        }
                     }
                 });
             });

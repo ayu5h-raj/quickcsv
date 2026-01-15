@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "quickcsv"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "arboard",
  "console_error_panic_hook",
