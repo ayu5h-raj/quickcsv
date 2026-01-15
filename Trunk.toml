@@ -1,5 +1,9 @@
 [build]
 target = "index.html"
 dist = "dist"
-release = true
+# Use release-fast profile for fast development builds
+# For production builds, use: trunk build --release
+release = false
+# Use the fast release profile (opt-level 3, no LTO, parallel codegen)
+cargo-profile = "release-fast"
 filehash = true

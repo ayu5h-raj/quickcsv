@@ -94,3 +94,9 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+# Fast release profile for development - faster compile times
+[profile.release-fast]
+inherits = "release"
+lto = false           # Disable LTO for faster linking
+codegen-units = 16    # Enable parallel compilation (default)
