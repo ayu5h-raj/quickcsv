@@ -26,6 +26,31 @@ QuickCSV is a high-performance CSV viewer for macOS built with Rust and egui.
 - Run `cargo fmt` before committing
 - Run `cargo clippy -- -D warnings` to check for warnings
 - Use inline format args: `format!("{value}")` not `format!("{}", value)`
+- **ALWAYS create separate branches for features and fixes** - never commit directly to main
+- Add comprehensive tests for new features and bug fixes
+
+## egui-Specific Guidelines
+
+### Context Menus and Sense Usage
+
+When implementing right-click context menus in egui:
+
+- **IMPORTANT**: Use `Sense::hover()` for widgets that need context menus, NOT `Sense::click()`
+- `Sense::click()` only captures primary (left) mouse button clicks
+- `Sense::hover()` enables both left-click interactions AND right-click context menus
+- Example:
+  ```rust
+  let response = ui.add(Label::new(text).sense(Sense::hover()));
+  response.context_menu(|ui| {
+      // Context menu items here
+  });
+  ```
+
+### Testing UI Features
+
+- Test new UI features with both `--profile release-fast` AND `--release` builds
+- Some issues only appear in optimized release builds
+- Always verify context menus, drag-and-drop, and mouse interactions work in release builds
 
 ## Build Profiles
 
@@ -89,25 +114,58 @@ trunk build --release
 
 ## Git Workflow
 
+**CRITICAL**: Always create a separate branch for every feature or fix. Never commit directly to main.
+
 1. Create feature branch: `feature/feature-name` or `fix/bug-name`
+   ```bash
+   git checkout -b feature/my-feature
+   # or
+   git checkout -b fix/my-bugfix
+   ```
 2. Make changes and commit with conventional commits:
    - `feat:` for new features
    - `fix:` for bug fixes
    - `perf:` for performance improvements
    - `docs:` for documentation
+   - `chore:` for version bumps, dependency updates
    - `ci:` for CI/CD changes
 3. Push branch and create PR
-4. After merge, create tag for release: `git tag v0.X.X && git push origin v0.X.X`
+   ```bash
+   git push -u origin feature/my-feature
+   ```
+4. After merge, bump version and create tag for release (see Release Process below)
 
 ## Release Process
 
-1. Update version in `Cargo.toml` (both `package.version` and `package.metadata.bundle.version`)
-2. Commit and push to main
-3. Create and push tag: `git tag vX.X.X && git push origin vX.X.X`
-4. GitHub Actions will automatically:
-   - Build the macOS app bundle
+### Version Bumping
+
+Follow semantic versioning (MAJOR.MINOR.PATCH):
+- **PATCH** (0.10.1 → 0.10.2): Bug fixes, small improvements
+- **MINOR** (0.10.2 → 0.11.0): New features, non-breaking changes
+- **MAJOR** (0.11.0 → 1.0.0): Breaking changes, major redesigns
+
+When bumping version:
+1. Update BOTH version fields in `Cargo.toml`:
+   - `package.version` (line 3)
+   - `package.metadata.bundle.version` (line 25)
+2. Commit on a branch (e.g., `chore/bump-version-0.10.2`)
+3. Push and create PR
+
+### Creating a Release
+
+1. After version bump PR is merged to main
+2. Create and push tag:
+   ```bash
+   git checkout main
+   git pull
+   git tag v0.10.2
+   git push origin v0.10.2
+   ```
+3. GitHub Actions will automatically:
+   - Build the macOS app bundle with `cargo build --release`
    - Create GitHub Release
    - Update Homebrew tap
+   - Deploy web version to GitHub Pages
 
 ### Troubleshooting Release Issues
 
@@ -146,14 +204,29 @@ trunk build --release
 ## Common Tasks
 
 ### Adding a new feature
-1. Create branch
-2. Implement in `src/main.rs`
-3. Test with large CSV files
-4. Run `cargo fmt && cargo clippy -- -D warnings`
-5. Commit, push, create PR
+1. Create feature branch: `git checkout -b feature/feature-name`
+2. Implement in `src/main.rs` (or appropriate module)
+3. Add tests in the same file using `#[cfg(test)]` module
+4. Test with large CSV files
+5. Test with BOTH profiles:
+   - `cargo run --profile release-fast` (quick testing)
+   - `cargo build --release && ./target/release/quickcsv` (final verification)
+6. Run `cargo fmt && cargo clippy -- -D warnings`
+7. Run tests: `cargo test --lib`
+8. Commit, push branch, and create PR
+
+### Fixing a bug
+1. Create fix branch: `git checkout -b fix/bug-name`
+2. Fix the bug in appropriate file(s)
+3. Add test case that reproduces and validates the fix
+4. Test with BOTH `--profile release-fast` AND `--release` builds
+5. Run `cargo fmt && cargo clippy -- -D warnings`
+6. Run tests: `cargo test --lib`
+7. Commit, push branch, and create PR
 
 ### Making a release
-1. Bump version in Cargo.toml
-2. Merge to main
-3. Tag and push: `git tag vX.X.X && git push origin vX.X.X`
-4. Monitor workflow at: https://github.com/ayu5h-raj/quickcsv/actions
+1. Create version bump branch: `git checkout -b chore/bump-version-X.X.X`
+2. Bump version in Cargo.toml (both fields)
+3. Push branch and create PR
+4. After merge, create and push tag: `git tag vX.X.X && git push origin vX.X.X`
+5. Monitor workflow at: https://github.com/ayu5h-raj/quickcsv/actions

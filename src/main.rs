@@ -1914,8 +1914,9 @@ impl FastCsvApp {
                                     };
 
                                     // Render the header text as clickable label and get the response
+                                    // Use hover() to enable both left-click (for sorting) and right-click (for context menu)
                                     let header_response = ui.add(
-                                        egui::Label::new(text).sense(egui::Sense::click())
+                                        egui::Label::new(text).sense(egui::Sense::hover())
                                     );
 
                                     // Right-click context menu for column header
