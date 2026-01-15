@@ -1,6 +1,6 @@
 [package]
 name = "quickcsv"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2021"
 description = "High-performance CSV viewer for macOS and Web"
 authors = ["QuickCSV Team"]
