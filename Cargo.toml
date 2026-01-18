@@ -1,6 +1,6 @@
 [package]
 name = "quickcsv"
-version = "0.10.2"
+version = "0.10.3"
 edition = "2021"
 description = "High-performance CSV viewer for macOS and Web"
 authors = ["QuickCSV Team"]
@@ -22,7 +22,7 @@ path = "src/main.rs"
 name = "QuickCSV"
 identifier = "com.quickcsv.app"
 icon = ["icons/icon.icns"]
-version = "0.10.2"
+version = "0.10.3"
 copyright = "Copyright © 2026 QuickCSV Team"
 category = "Developer Tool"
 short_description = "High-performance CSV viewer"
@@ -88,6 +88,7 @@ js-sys = "0.3"
 getrandom = { version = "0.2", features = ["js"] }
 web-sys = { version = "0.3", features = ["console", "Window", "Document", "HtmlElement", "File", "FileList", "FileReader", "HtmlInputElement"] }
 console_error_panic_hook = "0.1"
+serde-wasm-bindgen = "0.6"
 
 [profile.release]
 opt-level = 3

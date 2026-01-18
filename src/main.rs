@@ -4,6 +4,7 @@
 //! with zero lag. Uses memmap2 for zero-copy file loading and egui for the UI.
 
 // Module declarations
+mod analytics;
 mod csv;
 mod state;
 mod update;
@@ -432,6 +433,11 @@ impl FastCsvApp {
         // Reset filter state (no persistence - filters are session-only)
         tab.filter_state = FilterState::default();
         tab.filtered_indices = None;
+        // Reset file tracking flag for new file
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tab.file_tracked = false;
+        }
 
         // Get path string for file info
         let path_str = path.to_string_lossy().to_string();
@@ -517,6 +523,10 @@ impl FastCsvApp {
             tab.applied_filters.clear(); // Clear applied state
             return;
         }
+
+        // Track filter applied event
+        let filter_count = tab.filter_state.filters.len();
+        analytics::track_filter_applied(filter_count);
 
         // Check if we are already filtering
         if tab.is_filtering.load(Ordering::Relaxed) {
@@ -1026,6 +1036,9 @@ impl FastCsvApp {
         // Reset search state
         tab.search.current_index = 0;
         tab.search.active_query = query.clone();
+
+        // Track search performed event
+        analytics::track_search_performed();
 
         // Get total rows and visible columns for progress
         let (total_rows, visible_columns) = {
@@ -1646,19 +1659,38 @@ impl FastCsvApp {
         use egui_extras::{Column, TableBuilder};
 
         // Extract data from state first, then drop the lock
-        let (headers, total_rows, num_columns, _is_indexing) = {
+        let (headers, total_rows, num_columns, _is_indexing, just_loaded) = {
             let tab = &self.tabs[tab_idx];
             let state = tab.state.read();
             match &state.csv {
-                Some(csv) => (
-                    csv.headers.clone(),
-                    csv.indexed_row_count(),
-                    csv.headers.len(),
-                    !state.indexing_complete.load(Ordering::Relaxed),
-                ),
+                Some(csv) => {
+                    let is_indexing = !state.indexing_complete.load(Ordering::Relaxed);
+                    // Track file open when it first becomes ready (not indexing and not already tracked)
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let just_loaded = !is_indexing && !tab.file_tracked;
+                    #[cfg(target_arch = "wasm32")]
+                    let just_loaded = !is_indexing;
+                    (
+                        csv.headers.clone(),
+                        csv.indexed_row_count(),
+                        csv.headers.len(),
+                        is_indexing,
+                        just_loaded,
+                    )
+                }
                 None => return,
             }
         };
+
+        // Track file open event when file is first ready
+        if just_loaded {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let tab = &mut self.tabs[tab_idx];
+                tab.file_tracked = true;
+            }
+            analytics::track_file_open(total_rows, num_columns);
+        }
 
         // Store total row count for status bar
         {
@@ -2259,11 +2291,13 @@ impl FastCsvApp {
             self.ensure_tabs();
             let tab = self.active_tab_mut();
             tab.column_state.hide_column(col_idx);
+            analytics::track_column_action("hide");
         }
         if let Some(col_idx) = column_to_show {
             self.ensure_tabs();
             let tab = self.active_tab_mut();
             tab.column_state.show_column(col_idx);
+            analytics::track_column_action("show");
         }
 
         // Handle column drop for reordering
@@ -2275,6 +2309,7 @@ impl FastCsvApp {
                     if let Some(target) = drop_target_idx {
                         if dragged != target {
                             tab.column_state.reorder_visible_columns(dragged, target);
+                            analytics::track_column_action("reorder");
                         }
                     }
                     tab.column_state.dragged_column = None;
@@ -3458,12 +3493,14 @@ impl FastCsvApp {
         if let Some(idx) = move_up {
             if idx > 0 {
                 tab.column_state.reorder_visible_columns(idx, idx - 1);
+                analytics::track_column_action("reorder");
             }
         }
         if let Some(idx) = move_down {
             let visible_count = tab.column_state.get_visible_columns().len();
             if idx < visible_count - 1 {
                 tab.column_state.reorder_visible_columns(idx, idx + 1);
+                analytics::track_column_action("reorder");
             }
         }
 
@@ -4464,6 +4501,10 @@ fn main() -> eframe::Result<()> {
             app.load_recent_files();
             app.recent_files_loaded = true;
 
+            // Track app start
+            #[cfg(not(target_arch = "wasm32"))]
+            analytics::track_app_start();
+
             Ok(Box::new(app))
         }),
     )
@@ -4538,6 +4579,10 @@ fn main() {
                     let mut app = FastCsvApp::default();
                     app.load_recent_files();
                     app.recent_files_loaded = true;
+
+                    // Track app start (web version)
+                    #[cfg(target_arch = "wasm32")]
+                    analytics::track_app_start();
 
                     Ok(Box::new(app))
                 }),
