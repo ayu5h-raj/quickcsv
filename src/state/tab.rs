@@ -74,6 +74,9 @@ pub struct TabState {
     pub applied_sort_direction: SortDirection,
     /// Duration of last filter operation (for display)
     pub filter_duration: Option<std::time::Duration>,
+    /// Whether file_open event has been tracked for this tab
+    #[cfg(not(target_arch = "wasm32"))]
+    pub file_tracked: bool,
 }
 
 impl TabState {
@@ -106,6 +109,8 @@ impl TabState {
             applied_sort_column: None,
             applied_sort_direction: SortDirection::None,
             filter_duration: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            file_tracked: false,
         }
     }
 
@@ -146,6 +151,8 @@ impl TabState {
             applied_sort_column: None,
             applied_sort_direction: SortDirection::None,
             filter_duration: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            file_tracked: false,
         }
     }
 
@@ -180,6 +187,8 @@ impl TabState {
             applied_sort_column: None,
             applied_sort_direction: SortDirection::None,
             filter_duration: None,
+            #[cfg(target_arch = "wasm32")]
+            file_tracked: false, // Dummy field for WASM
         }
     }
 
