@@ -94,7 +94,61 @@
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
 
-      gtag('config', 'G-02EQ3MT9HS');
+      // Configure GA4 with user properties
+      gtag('config', 'G-02EQ3MT9HS', {
+        'custom_map': {
+          'app_version': 'app_version',
+          'platform': 'platform',
+          'browser': 'browser',
+          'os': 'os'
+        }
+      });
+
+      // Set user properties on page load
+      function setUserProperties() {
+        const userAgent = navigator.userAgent;
+        let browser = 'Unknown';
+        let os = 'Unknown';
+        
+        // Detect browser
+        if (userAgent.indexOf('Chrome') > -1 && userAgent.indexOf('Edg') === -1) {
+          browser = 'Chrome';
+        } else if (userAgent.indexOf('Firefox') > -1) {
+          browser = 'Firefox';
+        } else if (userAgent.indexOf('Safari') > -1 && userAgent.indexOf('Chrome') === -1) {
+          browser = 'Safari';
+        } else if (userAgent.indexOf('Edg') > -1) {
+          browser = 'Edge';
+        }
+        
+        // Detect OS
+        if (userAgent.indexOf('Mac') > -1) {
+          os = 'macOS';
+        } else if (userAgent.indexOf('Win') > -1) {
+          os = 'Windows';
+        } else if (userAgent.indexOf('Linux') > -1) {
+          os = 'Linux';
+        } else if (userAgent.indexOf('Android') > -1) {
+          os = 'Android';
+        } else if (userAgent.indexOf('iOS') > -1 || userAgent.indexOf('iPhone') > -1 || userAgent.indexOf('iPad') > -1) {
+          os = 'iOS';
+        }
+        
+        gtag('set', 'user_properties', {
+          'app_version': '0.10.2', // Update this when releasing new versions
+          'platform': 'web',
+          'browser': browser,
+          'os': os
+        });
+      }
+      
+      // Call on page load
+      setUserProperties();
+      
+      // Helper function for Rust/WASM to call
+      window.trackGAEvent = function(eventName, params) {
+        gtag('event', eventName, params || {});
+      };
     </script>
     
     <!-- Error handling and debugging -->

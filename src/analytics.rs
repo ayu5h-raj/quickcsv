@@ -11,18 +11,14 @@
 //! 2. Admin → Property → Data Streams → [Your Stream] → Measurement Protocol API secrets
 //! 3. Create a new secret and copy the value
 
-use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::thread;
-
-#[cfg(not(target_arch = "wasm32"))]
-use dirs;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread;
 
 /// Google Analytics Measurement ID (same as web version)
 const MEASUREMENT_ID: &str = "G-02EQ3MT9HS";
@@ -47,7 +43,7 @@ fn get_client_id() -> String {
     };
 
     // Create config directory if it doesn't exist
-    if let Err(_) = fs::create_dir_all(&config_dir) {
+    if fs::create_dir_all(&config_dir).is_err() {
         return generate_client_id(); // Fallback if directory creation fails
     }
 
@@ -89,8 +85,8 @@ fn generate_client_id() -> String {
 
     let hash = hasher.finish();
     let mut bytes = [0u8; 16];
-    for i in 0..16 {
-        bytes[i] = ((hash >> (i * 4)) & 0xFF) as u8;
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        *byte = ((hash >> (i * 4)) & 0xFF) as u8;
     }
 
     // Format as UUID v4
@@ -179,20 +175,43 @@ fn send_or_queue_event(payload: serde_json::Value) -> Result<(), ()> {
     );
 
     // Try to send the request
-    match ureq::post(&url)
-        .set("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(5))
-        .send_json(&payload)
-    {
-        Ok(_) => {
-            // Success - no need to queue
-            Ok(())
-        }
+    // Convert payload to JSON string
+    let json_str = match serde_json::to_string(&payload) {
+        Ok(s) => s,
         Err(_) => {
-            // Failed (likely offline) - queue for retry
+            // Failed to serialize - queue anyway
             queue_event(payload);
-            Err(())
+            return Err(());
         }
+    };
+
+    // Use ureq's send method - String implements AsSendBody
+    let result = ureq::post(&url)
+        .header("Content-Type", "application/json")
+        .send(&json_str);
+
+    // Debug: Log the payload structure (first 200 chars) for troubleshooting
+    #[cfg(debug_assertions)]
+    {
+        let preview = if json_str.len() > 200 {
+            format!("{}...", &json_str[..200])
+        } else {
+            json_str.clone()
+        };
+        eprintln!("[Analytics] Sending event payload: {}", preview);
+    }
+
+    if result.is_err() {
+        // Failed (likely offline) - queue for retry
+        #[cfg(debug_assertions)]
+        eprintln!("[Analytics] Failed to send event, queuing for retry");
+        queue_event(payload);
+        Err(())
+    } else {
+        // Success - no need to queue
+        #[cfg(debug_assertions)]
+        eprintln!("[Analytics] Event sent successfully");
+        Ok(())
     }
 }
 
@@ -211,6 +230,8 @@ pub fn retry_queued_events() {
             if send_or_queue_event(event.clone()).is_err() {
                 // Still offline or failed - keep in queue
                 remaining_events.push(event);
+            } else {
+                // Successfully sent - don't add to remaining
             }
         }
 
@@ -226,12 +247,55 @@ pub fn retry_queued_events() {
     });
 }
 
+/// Get user properties for analytics
+#[cfg(not(target_arch = "wasm32"))]
+fn get_user_properties() -> serde_json::Value {
+    use crate::update::CURRENT_VERSION;
+
+    // Get OS information
+    let os = if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(target_os = "windows") {
+        "Windows"
+    } else if cfg!(target_os = "linux") {
+        "Linux"
+    } else {
+        "Unknown"
+    };
+
+    // Get architecture
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "unknown"
+    };
+
+    // GA4 Measurement Protocol requires user properties to be objects with "value" field
+    serde_json::json!({
+        "app_version": {
+            "value": CURRENT_VERSION
+        },
+        "os": {
+            "value": os
+        },
+        "arch": {
+            "value": arch
+        },
+        "platform": {
+            "value": "desktop"
+        }
+    })
+}
+
 /// Send an event to Google Analytics (non-blocking, runs in background thread)
 /// If offline, the event will be queued and retried later
 #[cfg(not(target_arch = "wasm32"))]
 fn track_event_internal(event_name: &str, params: Option<serde_json::Value>) {
     let client_id = get_client_id();
     let event_name = event_name.to_string();
+    let user_properties = get_user_properties();
 
     thread::spawn(move || {
         // Build the event payload
@@ -247,8 +311,23 @@ fn track_event_internal(event_name: &str, params: Option<serde_json::Value>) {
             }
         }
 
+        // CRITICAL: GA4 requires engagement_time_msec for events to count toward Active Users
+        // Set to 100ms (minimum engagement) if not already set in params
+        if !event["params"].is_object()
+            || !event["params"]
+                .as_object()
+                .unwrap()
+                .contains_key("engagement_time_msec")
+        {
+            if !event["params"].is_object() {
+                event["params"] = serde_json::json!({});
+            }
+            event["params"]["engagement_time_msec"] = serde_json::json!(100);
+        }
+
         let payload = serde_json::json!({
             "client_id": client_id,
+            "user_properties": user_properties,
             "events": [event]
         });
 
@@ -303,6 +382,7 @@ pub fn track_column_action(action: &str) {
 
 /// Track export action (if implemented in future)
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)] // Reserved for future export feature
 pub fn track_export_action(format: &str) {
     let params = serde_json::json!({
         "format": format,
@@ -310,18 +390,79 @@ pub fn track_export_action(format: &str) {
     track_event_internal("export_action", Some(params));
 }
 
-// WASM stubs (no-op for web version - web uses JavaScript gtag.js)
+// WASM implementation - calls JavaScript gtag functions
 #[cfg(target_arch = "wasm32")]
-pub fn track_app_start() {}
+fn call_js_track_event(event_name: &str, params: Option<serde_json::Value>) {
+    use wasm_bindgen::prelude::*;
+    use web_sys::window;
+
+    if let Some(window) = window() {
+        // Get the trackGAEvent function from window
+        if let Ok(js_func) = js_sys::Reflect::get(&window, &JsValue::from_str("trackGAEvent")) {
+            if js_func.is_function() {
+                let func = js_sys::Function::from(js_func);
+                let event_name_js = JsValue::from_str(event_name);
+
+                // Convert params to JS object if provided
+                let params_js = if let Some(p) = params {
+                    // Convert serde_json::Value to JsValue
+                    serde_wasm_bindgen::to_value(&p).unwrap_or(JsValue::NULL)
+                } else {
+                    JsValue::NULL
+                };
+
+                // Call the JavaScript function
+                let _ = func.call2(&window, &event_name_js, &params_js);
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
-pub fn retry_queued_events() {}
+pub fn track_app_start() {
+    call_js_track_event("app_start", None);
+}
+
 #[cfg(target_arch = "wasm32")]
-pub fn track_file_open(_row_count: usize, _column_count: usize) {}
+pub fn retry_queued_events() {
+    // No-op for web - JavaScript handles this automatically
+}
+
 #[cfg(target_arch = "wasm32")]
-pub fn track_filter_applied(_filter_count: usize) {}
+pub fn track_file_open(row_count: usize, column_count: usize) {
+    let params = serde_json::json!({
+        "row_count": row_count,
+        "column_count": column_count,
+    });
+    call_js_track_event("file_open", Some(params));
+}
+
 #[cfg(target_arch = "wasm32")]
-pub fn track_search_performed() {}
+pub fn track_filter_applied(filter_count: usize) {
+    let params = serde_json::json!({
+        "filter_count": filter_count,
+    });
+    call_js_track_event("filter_applied", Some(params));
+}
+
 #[cfg(target_arch = "wasm32")]
-pub fn track_column_action(_action: &str) {}
+pub fn track_search_performed() {
+    call_js_track_event("search_performed", None);
+}
+
 #[cfg(target_arch = "wasm32")]
-pub fn track_export_action(_format: &str) {}
+pub fn track_column_action(action: &str) {
+    let params = serde_json::json!({
+        "action": action,
+    });
+    call_js_track_event("column_action", Some(params));
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)] // Reserved for future export feature
+pub fn track_export_action(format: &str) {
+    let params = serde_json::json!({
+        "format": format,
+    });
+    call_js_track_event("export_action", Some(params));
+}

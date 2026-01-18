@@ -88,6 +88,7 @@ js-sys = "0.3"
 getrandom = { version = "0.2", features = ["js"] }
 web-sys = { version = "0.3", features = ["console", "Window", "Document", "HtmlElement", "File", "FileList", "FileReader", "HtmlInputElement"] }
 console_error_panic_hook = "0.1"
+serde-wasm-bindgen = "0.6"
 
 [profile.release]
 opt-level = 3

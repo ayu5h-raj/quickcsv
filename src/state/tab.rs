@@ -187,8 +187,6 @@ impl TabState {
             applied_sort_column: None,
             applied_sort_direction: SortDirection::None,
             filter_duration: None,
-            #[cfg(target_arch = "wasm32")]
-            file_tracked: false, // Dummy field for WASM
         }
     }
 

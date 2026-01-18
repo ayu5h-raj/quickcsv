@@ -25,8 +25,6 @@ use wasm_bindgen::JsCast;
 
 // Imports from modules
 #[cfg(not(target_arch = "wasm32"))]
-use analytics;
-#[cfg(not(target_arch = "wasm32"))]
 use csv::init_csv_progressive;
 use state::{
     ColumnState, FilterCondition, FilterOperator, FilterState, LoadState, SearchStatus,
@@ -437,7 +435,9 @@ impl FastCsvApp {
         tab.filtered_indices = None;
         // Reset file tracking flag for new file
         #[cfg(not(target_arch = "wasm32"))]
-        tab.file_tracked = false;
+        {
+            tab.file_tracked = false;
+        }
 
         // Get path string for file info
         let path_str = path.to_string_lossy().to_string();
@@ -525,11 +525,8 @@ impl FastCsvApp {
         }
 
         // Track filter applied event
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let filter_count = tab.filter_state.filters.len();
-            analytics::track_filter_applied(filter_count);
-        }
+        let filter_count = tab.filter_state.filters.len();
+        analytics::track_filter_applied(filter_count);
 
         // Check if we are already filtering
         if tab.is_filtering.load(Ordering::Relaxed) {
@@ -1041,7 +1038,6 @@ impl FastCsvApp {
         tab.search.active_query = query.clone();
 
         // Track search performed event
-        #[cfg(not(target_arch = "wasm32"))]
         analytics::track_search_performed();
 
         // Get total rows and visible columns for progress
@@ -1673,7 +1669,7 @@ impl FastCsvApp {
                     #[cfg(not(target_arch = "wasm32"))]
                     let just_loaded = !is_indexing && !tab.file_tracked;
                     #[cfg(target_arch = "wasm32")]
-                    let just_loaded = false;
+                    let just_loaded = !is_indexing;
                     (
                         csv.headers.clone(),
                         csv.indexed_row_count(),
@@ -1687,10 +1683,12 @@ impl FastCsvApp {
         };
 
         // Track file open event when file is first ready
-        #[cfg(not(target_arch = "wasm32"))]
         if just_loaded {
-            let tab = &mut self.tabs[tab_idx];
-            tab.file_tracked = true;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let tab = &mut self.tabs[tab_idx];
+                tab.file_tracked = true;
+            }
             analytics::track_file_open(total_rows, num_columns);
         }
 
@@ -2293,14 +2291,12 @@ impl FastCsvApp {
             self.ensure_tabs();
             let tab = self.active_tab_mut();
             tab.column_state.hide_column(col_idx);
-            #[cfg(not(target_arch = "wasm32"))]
             analytics::track_column_action("hide");
         }
         if let Some(col_idx) = column_to_show {
             self.ensure_tabs();
             let tab = self.active_tab_mut();
             tab.column_state.show_column(col_idx);
-            #[cfg(not(target_arch = "wasm32"))]
             analytics::track_column_action("show");
         }
 
@@ -2313,7 +2309,6 @@ impl FastCsvApp {
                     if let Some(target) = drop_target_idx {
                         if dragged != target {
                             tab.column_state.reorder_visible_columns(dragged, target);
-                            #[cfg(not(target_arch = "wasm32"))]
                             analytics::track_column_action("reorder");
                         }
                     }
@@ -3498,7 +3493,6 @@ impl FastCsvApp {
         if let Some(idx) = move_up {
             if idx > 0 {
                 tab.column_state.reorder_visible_columns(idx, idx - 1);
-                #[cfg(not(target_arch = "wasm32"))]
                 analytics::track_column_action("reorder");
             }
         }
@@ -3506,7 +3500,6 @@ impl FastCsvApp {
             let visible_count = tab.column_state.get_visible_columns().len();
             if idx < visible_count - 1 {
                 tab.column_state.reorder_visible_columns(idx, idx + 1);
-                #[cfg(not(target_arch = "wasm32"))]
                 analytics::track_column_action("reorder");
             }
         }
@@ -4586,6 +4579,10 @@ fn main() {
                     let mut app = FastCsvApp::default();
                     app.load_recent_files();
                     app.recent_files_loaded = true;
+
+                    // Track app start (web version)
+                    #[cfg(target_arch = "wasm32")]
+                    analytics::track_app_start();
 
                     Ok(Box::new(app))
                 }),
