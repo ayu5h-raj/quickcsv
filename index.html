@@ -87,8 +87,8 @@
     <!-- Trunk Rust/WASM loader - MUST be before any script tags -->
     
 <script type="module">
-import init, * as bindings from '/quickcsv/quickcsv-9722e2c73306f2bd.js';
-const wasm = await init({ module_or_path: '/quickcsv/quickcsv-9722e2c73306f2bd_bg.wasm' });
+import init, * as bindings from '/quickcsv/quickcsv-2832c2770bd5e19b.js';
+const wasm = await init({ module_or_path: '/quickcsv/quickcsv-2832c2770bd5e19b_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -105,7 +105,61 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
 
-      gtag('config', 'G-02EQ3MT9HS');
+      // Configure GA4 with user properties
+      gtag('config', 'G-02EQ3MT9HS', {
+        'custom_map': {
+          'app_version': 'app_version',
+          'platform': 'platform',
+          'browser': 'browser',
+          'os': 'os'
+        }
+      });
+
+      // Set user properties on page load
+      function setUserProperties() {
+        const userAgent = navigator.userAgent;
+        let browser = 'Unknown';
+        let os = 'Unknown';
+        
+        // Detect browser
+        if (userAgent.indexOf('Chrome') > -1 && userAgent.indexOf('Edg') === -1) {
+          browser = 'Chrome';
+        } else if (userAgent.indexOf('Firefox') > -1) {
+          browser = 'Firefox';
+        } else if (userAgent.indexOf('Safari') > -1 && userAgent.indexOf('Chrome') === -1) {
+          browser = 'Safari';
+        } else if (userAgent.indexOf('Edg') > -1) {
+          browser = 'Edge';
+        }
+        
+        // Detect OS
+        if (userAgent.indexOf('Mac') > -1) {
+          os = 'macOS';
+        } else if (userAgent.indexOf('Win') > -1) {
+          os = 'Windows';
+        } else if (userAgent.indexOf('Linux') > -1) {
+          os = 'Linux';
+        } else if (userAgent.indexOf('Android') > -1) {
+          os = 'Android';
+        } else if (userAgent.indexOf('iOS') > -1 || userAgent.indexOf('iPhone') > -1 || userAgent.indexOf('iPad') > -1) {
+          os = 'iOS';
+        }
+        
+        gtag('set', 'user_properties', {
+          'app_version': '0.10.3', // Update this when releasing new versions
+          'platform': 'web',
+          'browser': browser,
+          'os': os
+        });
+      }
+      
+      // Call on page load
+      setUserProperties();
+      
+      // Helper function for Rust/WASM to call
+      window.trackGAEvent = function(eventName, params) {
+        gtag('event', eventName, params || {});
+      };
     </script>
     
     <!-- Error handling and debugging -->
@@ -137,7 +191,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
             }
         });
     </script>
-<link rel="modulepreload" href="/quickcsv/quickcsv-9722e2c73306f2bd.js" crossorigin="anonymous" integrity="sha384-PiNZjzai+av5EPZoA14tiDV958v7/HR61AWLhMnXATw/2L8+dD4/CbgiBD0IW7eA"><link rel="preload" href="/quickcsv/quickcsv-9722e2c73306f2bd_bg.wasm" crossorigin="anonymous" integrity="sha384-pFkv3ZljQaxr11KbnqYXXaEnLTNFhxSuz3lpo2Be5Cfnkq6PxB/oITLl+UUaq/BZ" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/quickcsv/quickcsv-2832c2770bd5e19b.js" crossorigin="anonymous" integrity="sha384-QNIvwiFurf+zJNL2uJIGAC1O4g4+B4YKTSHNYd1IfliNwbxfgkYCfLsdNewFX8S9"><link rel="preload" href="/quickcsv/quickcsv-2832c2770bd5e19b_bg.wasm" crossorigin="anonymous" integrity="sha384-p6Bd6Bio2XzJ/uInq+wW1i7E8JHpVTFuEVHgqdHKG9SsRGRmq3WNdb5j4+B2L1CC" as="fetch" type="application/wasm"></head>
 
 <body>
     <!-- The WASM code will reside here: -->
