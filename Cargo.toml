@@ -23,6 +23,7 @@ name = "QuickCSV"
 identifier = "com.quickcsv.app"
 icon = ["icons/icon.icns"]
 version = "0.10.3"
+osx_info_plist_exts = ["macos/file-associations.plist"]
 copyright = "Copyright © 2026 QuickCSV Team"
 category = "Developer Tool"
 short_description = "High-performance CSV viewer"
@@ -38,6 +39,7 @@ minimum_system_version = "10.14"
 [dependencies]
 # GUI framework - immediate mode, native macOS support
 eframe = { version = "0.33", features = ["default"] }
+winit = "0.30"
 
 # Extended widgets including virtualized tables
 egui_extras = { version = "0.33", features = ["default"] }
@@ -79,6 +81,11 @@ ureq = "3.1"
 
 # Image loading for app icon
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder"] }
+objc2-foundation = { version = "0.2", features = ["NSAppleEventDescriptor", "NSAppleEventManager", "NSString", "NSURL", "NSObject"] }
 
 # WASM-only dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
