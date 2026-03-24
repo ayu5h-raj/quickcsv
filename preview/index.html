@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+
+<!-- Disable zooming: -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+
+<head>
+    <base href="/quickcsv/preview/" />
+    <title>QuickCSV Web</title>
+    <style>
+        html {
+            /* Remove touch delay: */
+            touch-action: manipulation;
+        }
+
+        body {
+            /* Light mode background color for what is not covered by the egui canvas,
+            or where the egui canvas is translucent. */
+            background: #202020;
+            color: #909090;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        /* Allow canvas to fill entire web page: */
+        html,
+        body {
+            height: 100%;
+        }
+
+        /* Position canvas in center-top */
+        canvas {
+            display: block;
+            margin-right: auto;
+            margin-left: auto;
+            width: 100%;
+            height: 100%;
+        }
+
+        .centered {
+            margin-right: auto;
+            margin-left: auto;
+            display: block;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #f0f0f0;
+            font-size: 24px;
+            font-family: Ubuntu-Light, Helvetica, sans-serif;
+            text-align: center;
+        }
+
+        /* ---------------------------------------------- */
+        /* Loading animation from https://loading.io/css/ */
+        .lds-dual-ring {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+        }
+
+        .lds-dual-ring:after {
+            content: " ";
+            display: block;
+            width: 64px;
+            height: 64px;
+            margin: 8px;
+            border-radius: 50%;
+            border: 6px solid #fff;
+            border-color: #fff transparent #fff transparent;
+            animation: lds-dual-ring 1.2s linear infinite;
+        }
+
+        @keyframes lds-dual-ring {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+    
+    <!-- Trunk Rust/WASM loader - MUST be before any script tags -->
+    
+<script type="module">
+import init, * as bindings from '/quickcsv/preview/quickcsv-770cb4b0445ff136.js';
+const wasm = await init({ module_or_path: '/quickcsv/preview/quickcsv-770cb4b0445ff136_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+    
+    <!-- Google Analytics -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-02EQ3MT9HS"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      // Configure GA4 with user properties
+      gtag('config', 'G-02EQ3MT9HS', {
+        'custom_map': {
+          'app_version': 'app_version',
+          'platform': 'platform',
+          'browser': 'browser',
+          'os': 'os'
+        }
+      });
+
+      // Set user properties on page load
+      function setUserProperties() {
+        const userAgent = navigator.userAgent;
+        let browser = 'Unknown';
+        let os = 'Unknown';
+        
+        // Detect browser
+        if (userAgent.indexOf('Chrome') > -1 && userAgent.indexOf('Edg') === -1) {
+          browser = 'Chrome';
+        } else if (userAgent.indexOf('Firefox') > -1) {
+          browser = 'Firefox';
+        } else if (userAgent.indexOf('Safari') > -1 && userAgent.indexOf('Chrome') === -1) {
+          browser = 'Safari';
+        } else if (userAgent.indexOf('Edg') > -1) {
+          browser = 'Edge';
+        }
+        
+        // Detect OS
+        if (userAgent.indexOf('Mac') > -1) {
+          os = 'macOS';
+        } else if (userAgent.indexOf('Win') > -1) {
+          os = 'Windows';
+        } else if (userAgent.indexOf('Linux') > -1) {
+          os = 'Linux';
+        } else if (userAgent.indexOf('Android') > -1) {
+          os = 'Android';
+        } else if (userAgent.indexOf('iOS') > -1 || userAgent.indexOf('iPhone') > -1 || userAgent.indexOf('iPad') > -1) {
+          os = 'iOS';
+        }
+        
+        gtag('set', 'user_properties', {
+          'app_version': '0.10.3', // Update this when releasing new versions
+          'platform': 'web',
+          'browser': browser,
+          'os': os
+        });
+      }
+      
+      // Call on page load
+      setUserProperties();
+      
+      // Helper function for Rust/WASM to call
+      window.trackGAEvent = function(eventName, params) {
+        gtag('event', eventName, params || {});
+      };
+    </script>
+    
+    <!-- Error handling and debugging -->
+    <script>
+        // Show error if WASM fails to load after timeout
+        setTimeout(function() {
+            const loadingText = document.getElementById('center_text');
+            if (loadingText && loadingText.parentNode) {
+                loadingText.innerHTML = '<p style="font-size:16px; color: #ff6b6b;">Failed to load QuickCSV</p><p style="font-size:12px; color: #909090; margin-top: 10px;">Please check the browser console (F12) for errors</p>';
+            }
+        }, 10000); // 10 second timeout
+
+        // Log when page loads
+        window.addEventListener('load', function() {
+            console.log('Page loaded, waiting for WASM...');
+        });
+
+        // Listen for Trunk events
+        window.addEventListener('TrunkApplicationStarted', function(event) {
+            console.log('Trunk application started:', event.detail);
+        });
+
+        // Catch any unhandled errors
+        window.addEventListener('error', function(event) {
+            console.error('Global error:', event.error);
+            const loadingText = document.getElementById('center_text');
+            if (loadingText && loadingText.parentNode) {
+                loadingText.innerHTML = '<p style="font-size:16px; color: #ff6b6b;">Error loading application</p><p style="font-size:12px; color: #909090; margin-top: 10px;">' + (event.error ? event.error.message : 'Unknown error') + '</p>';
+            }
+        });
+    </script>
+<link rel="modulepreload" href="/quickcsv/preview/quickcsv-770cb4b0445ff136.js" crossorigin="anonymous" integrity="sha384-IXBB/2+AjcrxLoNuY9VvzJIp7O1Ux5XbSelhqtXbIdbqu1E+LKeiNO12WirUpqhK"><link rel="preload" href="/quickcsv/preview/quickcsv-770cb4b0445ff136_bg.wasm" crossorigin="anonymous" integrity="sha384-KWRtpwIHQqWLcvmkNOr/l5q8vSlpfVa3n9PgEG6p3TG4sPkQcB25y1OVbHALSwNH" as="fetch" type="application/wasm"></head>
+
+<body>
+    <!-- The WASM code will reside here: -->
+    <canvas id="the_canvas_id"></canvas>
+
+    <!-- Loading text for when the WASM is still loading -->
+    <div class="centered" id="center_text">
+        <p style="font-size:16px">
+            Loading QuickCSV...
+        </p>
+        <div class="lds-dual-ring"></div>
+    </div>
+</body>
+
+</html>
