@@ -4471,6 +4471,55 @@ fn load_icon() -> egui::IconData {
     }
 }
 
+const CJK_FONT_NAME: &str = "quickcsv_cjk_fallback";
+
+#[cfg(not(target_arch = "wasm32"))]
+const MACOS_CJK_FONT_CANDIDATES: &[&str] = &[
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+];
+
+fn app_font_definitions() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = install_native_cjk_font_fallback(&mut fonts, &|path| std::fs::read(path).ok());
+    }
+
+    fonts
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn install_native_cjk_font_fallback(
+    fonts: &mut egui::FontDefinitions,
+    load_font: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> bool {
+    let Some(font_bytes) = MACOS_CJK_FONT_CANDIDATES
+        .iter()
+        .find_map(|path| load_font(path))
+    else {
+        return false;
+    };
+
+    fonts.font_data.insert(
+        CJK_FONT_NAME.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_owned(font_bytes)),
+    );
+
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        let family_fonts = fonts.families.entry(family).or_default();
+        if !family_fonts.iter().any(|name| name == CJK_FONT_NAME) {
+            family_fonts.push(CJK_FONT_NAME.to_owned());
+        }
+    }
+
+    true
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let icon = load_icon();
@@ -4488,10 +4537,7 @@ fn main() -> eframe::Result<()> {
         "QuickCSV",
         options,
         Box::new(|cc| {
-            // Add Phosphor icons to fonts
-            let mut fonts = egui::FontDefinitions::default();
-            egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-            cc.egui_ctx.set_fonts(fonts);
+            cc.egui_ctx.set_fonts(app_font_definitions());
 
             // Follow system theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
@@ -4567,10 +4613,7 @@ fn main() {
                 canvas,
                 web_options,
                 Box::new(|cc| {
-                    // Add Phosphor icons to fonts
-                    let mut fonts = egui::FontDefinitions::default();
-                    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-                    cc.egui_ctx.set_fonts(fonts);
+                    cc.egui_ctx.set_fonts(app_font_definitions());
 
                     // Follow system theme
                     cc.egui_ctx.set_visuals(egui::Visuals::dark());
@@ -4594,7 +4637,6 @@ fn main() {
 
 #[cfg(test)]
 mod search_tests {
-    use crate::state::search::SearchResults;
     use crate::state::{SearchState, SearchStatus};
 
     /// Test that search query matching works correctly
@@ -4703,5 +4745,37 @@ mod search_tests {
             let matches = text.to_lowercase().contains(&query_lower);
             assert_eq!(matches, should_match, "Failed for text: {:?}", text);
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod font_tests {
+    use super::{install_native_cjk_font_fallback, CJK_FONT_NAME};
+    use eframe::egui::{self, FontFamily};
+
+    #[test]
+    fn registers_loaded_cjk_fallback_for_text_families() {
+        let mut fonts = egui::FontDefinitions::default();
+        let inserted = install_native_cjk_font_fallback(&mut fonts, &|path| {
+            if path.ends_with("Hiragino Sans GB.ttc") {
+                Some(vec![1, 2, 3, 4])
+            } else {
+                None
+            }
+        });
+
+        assert!(
+            inserted,
+            "expected a native CJK fallback font to be installed"
+        );
+        assert!(fonts.font_data.contains_key(CJK_FONT_NAME));
+        assert!(fonts
+            .families
+            .get(&FontFamily::Proportional)
+            .is_some_and(|family| family.iter().any(|name| name == CJK_FONT_NAME)));
+        assert!(fonts
+            .families
+            .get(&FontFamily::Monospace)
+            .is_some_and(|family| family.iter().any(|name| name == CJK_FONT_NAME)));
     }
 }
