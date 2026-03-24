@@ -233,6 +233,10 @@ function __wasm_bindgen_func_elem_394(arg0, arg1, arg2) {
     wasm.__wasm_bindgen_func_elem_394(arg0, arg1, addHeapObject(arg2));
 }
 
+function __wasm_bindgen_func_elem_2362(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_2362(arg0, arg1);
+}
+
 function __wasm_bindgen_func_elem_1141(arg0, arg1) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
@@ -245,10 +249,6 @@ function __wasm_bindgen_func_elem_1141(arg0, arg1) {
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
     }
-}
-
-function __wasm_bindgen_func_elem_2362(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_2362(arg0, arg1);
 }
 
 function __wasm_bindgen_func_elem_1947(arg0, arg1, arg2, arg3) {
