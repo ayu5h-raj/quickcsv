@@ -1,6 +1,6 @@
 [package]
 name = "quickcsv"
-version = "0.10.3"
+version = "0.10.4"
 edition = "2021"
 description = "High-performance CSV viewer for macOS and Web"
 authors = ["QuickCSV Team"]
@@ -22,7 +22,7 @@ path = "src/main.rs"
 name = "QuickCSV"
 identifier = "com.quickcsv.app"
 icon = ["icons/icon.icns"]
-version = "0.10.3"
+version = "0.10.4"
 osx_info_plist_exts = ["macos/file-associations.plist"]
 copyright = "Copyright © 2026 QuickCSV Team"
 category = "Developer Tool"
