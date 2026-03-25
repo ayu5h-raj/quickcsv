@@ -12,8 +12,18 @@ mod utils;
 
 use eframe::egui::{self, Color32, Key};
 
+#[cfg(target_os = "macos")]
+use objc2::encode::{Encode, EncodeArguments, EncodeReturn};
+#[cfg(target_os = "macos")]
+use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+#[cfg(target_os = "macos")]
+use objc2::{ffi, sel};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSApplication, NSApplicationDelegateReply};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{MainThreadMarker, NSArray, NSString, NSURL};
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 #[cfg(not(target_arch = "wasm32"))]
@@ -62,6 +72,205 @@ fn current_timestamp() -> i64 {
             .as_secs() as i64
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_startup_file_paths<I, F>(args: I, exists: F) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+    F: Fn(&Path) -> bool,
+{
+    args.into_iter()
+        .skip(1)
+        .map(PathBuf::from)
+        .filter(|path| exists(path.as_path()))
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static PENDING_NATIVE_OPEN_PATHS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+    static NATIVE_REPAINT_CONTEXT: std::cell::RefCell<Option<egui::Context>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_native_repaint_context(ctx: egui::Context) {
+    NATIVE_REPAINT_CONTEXT.with(|slot| {
+        *slot.borrow_mut() = Some(ctx);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn queue_native_open_path(path: PathBuf) {
+    if !path.exists() {
+        return;
+    }
+
+    PENDING_NATIVE_OPEN_PATHS.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if !pending.iter().any(|queued| queued == &path) {
+            pending.push(path);
+        }
+    });
+
+    NATIVE_REPAINT_CONTEXT.with(|ctx| {
+        if let Some(ctx) = ctx.borrow().clone() {
+            ctx.request_repaint();
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn queue_native_open_paths<I>(paths: I)
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    for path in paths {
+        queue_native_open_path(path);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn take_pending_native_open_paths() -> Vec<PathBuf> {
+    PENDING_NATIVE_OPEN_PATHS.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_method_type_encoding<Args, Ret>() -> std::ffi::CString
+where
+    Args: EncodeArguments,
+    Ret: EncodeReturn,
+{
+    use std::fmt::Write;
+
+    let mut types = format!(
+        "{}{}{}",
+        Ret::ENCODING_RETURN,
+        <*mut AnyObject>::ENCODING,
+        Sel::ENCODING
+    );
+    for encoding in Args::ENCODINGS {
+        write!(&mut types, "{encoding}").expect("method type encoding should be writable");
+    }
+    std::ffi::CString::new(types).expect("method type encoding should not contain null bytes")
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_delegate_method<Args, Ret>(delegate_class: &AnyClass, selector: Sel, imp: Imp)
+where
+    Args: EncodeArguments,
+    Ret: EncodeReturn,
+{
+    if delegate_class.instance_method(selector).is_some() {
+        return;
+    }
+
+    let types = macos_method_type_encoding::<Args, Ret>();
+    let added = unsafe {
+        ffi::class_addMethod(
+            (delegate_class as *const AnyClass).cast_mut().cast(),
+            selector.as_ptr(),
+            Some(imp),
+            types.as_ptr(),
+        )
+    };
+    assert!(
+        added,
+        "failed to add selector {selector} to macOS app delegate"
+    );
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn quickcsv_application_open_file(
+    _this: &AnyObject,
+    _cmd: Sel,
+    _sender: &NSApplication,
+    filename: &NSString,
+) -> Bool {
+    queue_native_open_path(PathBuf::from(filename.to_string()));
+    Bool::YES
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn quickcsv_application_open_files(
+    _this: &AnyObject,
+    _cmd: Sel,
+    sender: &NSApplication,
+    filenames: &NSArray<NSString>,
+) {
+    queue_native_open_paths(
+        filenames
+            .into_iter()
+            .map(|filename| PathBuf::from(filename.to_string())),
+    );
+    unsafe {
+        sender.replyToOpenOrPrint(NSApplicationDelegateReply::Success);
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn quickcsv_application_open_urls(
+    _this: &AnyObject,
+    _cmd: Sel,
+    _sender: &NSApplication,
+    urls: &NSArray<NSURL>,
+) {
+    queue_native_open_paths(urls.into_iter().filter_map(|url| {
+        if unsafe { url.isFileURL() } {
+            unsafe { url.path() }.map(|path| PathBuf::from(path.to_string()))
+        } else {
+            None
+        }
+    }));
+}
+
+#[cfg(target_os = "macos")]
+type MacOsOpenFileMethod =
+    for<'a, 'b, 'c> extern "C" fn(&'a AnyObject, Sel, &'b NSApplication, &'c NSString) -> Bool;
+
+#[cfg(target_os = "macos")]
+type MacOsOpenFilesMethod =
+    for<'a, 'b, 'c> extern "C" fn(&'a AnyObject, Sel, &'b NSApplication, &'c NSArray<NSString>);
+
+#[cfg(target_os = "macos")]
+type MacOsOpenUrlsMethod =
+    for<'a, 'b, 'c> extern "C" fn(&'a AnyObject, Sel, &'b NSApplication, &'c NSArray<NSURL>);
+
+#[cfg(target_os = "macos")]
+fn install_macos_file_open_hooks() {
+    let mtm = MainThreadMarker::new().expect("macOS file open hooks require main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    let delegate =
+        unsafe { app.delegate() }.expect("winit should register an application delegate");
+    let delegate_object: &AnyObject = unsafe { &*((&*delegate) as *const _ as *const AnyObject) };
+    let delegate_class = delegate_object.class();
+
+    unsafe {
+        add_delegate_method::<(&NSApplication, &NSString), Bool>(
+            delegate_class,
+            sel!(application:openFile:),
+            std::mem::transmute::<MacOsOpenFileMethod, unsafe extern "C" fn()>(
+                quickcsv_application_open_file as MacOsOpenFileMethod,
+            ),
+        );
+        add_delegate_method::<(&NSApplication, &NSArray<NSString>), ()>(
+            delegate_class,
+            sel!(application:openFiles:),
+            std::mem::transmute::<MacOsOpenFilesMethod, unsafe extern "C" fn()>(
+                quickcsv_application_open_files as MacOsOpenFilesMethod,
+            ),
+        );
+        add_delegate_method::<(&NSApplication, &NSArray<NSURL>), ()>(
+            delegate_class,
+            sel!(application:openURLs:),
+            std::mem::transmute::<MacOsOpenUrlsMethod, unsafe extern "C" fn()>(
+                quickcsv_application_open_urls as MacOsOpenUrlsMethod,
+            ),
+        );
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
+fn install_macos_file_open_hooks() {}
 
 /// Height of each row in pixels
 const ROW_HEIGHT: f32 = 24.0;
@@ -273,7 +482,7 @@ impl FastCsvApp {
     fn open_recent_file(&mut self, path: &str, ctx: &egui::Context) {
         let path_buf = PathBuf::from(path);
         if path_buf.exists() {
-            self.load_file(path_buf, ctx.clone());
+            self.open_native_path(path_buf, ctx);
         } else {
             // Remove from recent files if it doesn't exist
             self.recent_files.remove_file(path);
@@ -406,11 +615,41 @@ impl FastCsvApp {
             .add_filter("All Files", &["*"])
             .pick_file()
         {
-            // Create new tab for the file
-            let new_tab = TabState::from_path(path.clone());
-            self.tabs.push(new_tab);
+            self.open_native_path(path, ctx);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn should_reuse_empty_tab_for_open(&self) -> bool {
+        self.tabs.len() == 1
+            && self.active_tab_index == 0
+            && self.tabs[0].file_path.is_empty()
+            && self.tabs[0].is_empty()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_native_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if !path.exists() {
+            return;
+        }
+
+        self.ensure_tabs();
+
+        if self.should_reuse_empty_tab_for_open() {
+            self.tabs[0] = TabState::from_path(path.clone());
+            self.active_tab_index = 0;
+        } else {
+            self.tabs.push(TabState::from_path(path.clone()));
             self.active_tab_index = self.tabs.len() - 1;
-            self.load_file(path, ctx.clone());
+        }
+
+        self.load_file(path, ctx.clone());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn consume_pending_native_open_paths(&mut self, ctx: &egui::Context) {
+        for path in take_pending_native_open_paths() {
+            self.open_native_path(path, ctx);
         }
     }
 
@@ -2753,7 +2992,7 @@ impl FastCsvApp {
             // Header info bar
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("{} columns", num_fields))
+                    egui::RichText::new(format!("{num_fields} columns"))
                         .color(Color32::from_rgb(150, 150, 150)),
                 );
 
@@ -2795,7 +3034,7 @@ impl FastCsvApp {
                                     .headers
                                     .get(i)
                                     .cloned()
-                                    .unwrap_or_else(|| format!("col_{}", i));
+                                    .unwrap_or_else(|| format!("col_{i}"));
                                 json_obj.insert(header, serde_json::Value::String(field.clone()));
                             }
                             if let Ok(json_str) = serde_json::to_string_pretty(&json_obj) {
@@ -3007,7 +3246,7 @@ impl FastCsvApp {
         let current_filter = tab.filter_state.filters.get(&col_idx);
         let has_filter = tab.filter_state.has_filter(col_idx);
 
-        egui::Window::new(format!("Filter: {}", col_name))
+        egui::Window::new(format!("Filter: {col_name}"))
             .resizable(false)
             .collapsible(false)
             .default_width(420.0)
@@ -3766,6 +4005,9 @@ impl eframe::App for FastCsvApp {
             }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        self.consume_pending_native_open_paths(ctx);
+
         // Check for updates on startup (only once)
         if !self.update_state.check_initiated {
             self.update_state.check_initiated = true;
@@ -4432,22 +4674,8 @@ impl eframe::App for FastCsvApp {
                 }
             });
 
-            // Open each dropped file in a new tab (first file is enough for now)
             if let Some(path) = dropped_paths.into_iter().next() {
-                let path_str = path.to_string_lossy().to_string();
-                let file_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&path_str)
-                    .to_string();
-                self.recent_files.add_file(path_str, file_name);
-                self.save_recent_files();
-
-                // Create a new tab for the dropped file
-                let new_tab = TabState::from_path(path.clone());
-                self.tabs.push(new_tab);
-                self.active_tab_index = self.tabs.len() - 1;
-                self.load_file(path, ctx.clone());
+                self.open_native_path(path, ctx);
             }
         }
     }
@@ -4533,11 +4761,20 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let event_loop =
+        winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event().build()?;
+    install_macos_file_open_hooks();
+    queue_native_open_paths(collect_startup_file_paths(
+        std::env::args_os(),
+        Path::exists,
+    ));
+
+    let mut app = eframe::create_native(
         "QuickCSV",
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_fonts(app_font_definitions());
+            set_native_repaint_context(cc.egui_ctx.clone());
 
             // Follow system theme
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
@@ -4546,6 +4783,7 @@ fn main() -> eframe::Result<()> {
             let mut app = FastCsvApp::default();
             app.load_recent_files();
             app.recent_files_loaded = true;
+            app.consume_pending_native_open_paths(&cc.egui_ctx);
 
             // Track app start
             #[cfg(not(target_arch = "wasm32"))]
@@ -4553,7 +4791,11 @@ fn main() -> eframe::Result<()> {
 
             Ok(Box::new(app))
         }),
-    )
+        &event_loop,
+    );
+
+    event_loop.run_app(&mut app)?;
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -4745,6 +4987,115 @@ mod search_tests {
             let matches = text.to_lowercase().contains(&query_lower);
             assert_eq!(matches, should_match, "Failed for text: {:?}", text);
         }
+    }
+}
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod plist_tests {
+    use std::path::PathBuf;
+
+    fn repo_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    #[test]
+    fn cargo_bundle_references_macos_plist_extensions() {
+        let cargo_toml =
+            std::fs::read_to_string(repo_path("Cargo.toml")).expect("Cargo.toml should exist");
+
+        assert!(
+            cargo_toml.contains("osx_info_plist_exts"),
+            "bundle config should reference an extra macOS plist fragment"
+        );
+        assert!(
+            cargo_toml.contains("macos/file-associations.plist"),
+            "bundle config should include the file association plist fragment"
+        );
+    }
+
+    #[test]
+    fn macos_bundle_declares_csv_file_associations() {
+        let plist = std::fs::read_to_string(repo_path("macos/file-associations.plist"))
+            .expect("macOS file association plist should exist");
+
+        assert!(
+            plist.contains("CFBundleDocumentTypes"),
+            "plist should declare macOS document types"
+        );
+        assert!(
+            plist.contains("<string>csv</string>"),
+            "plist should declare csv extension support"
+        );
+        assert!(
+            plist.contains("<string>tsv</string>"),
+            "plist should declare tsv extension support"
+        );
+        assert!(
+            !plist.contains("<string>public.plain-text</string>"),
+            "plist should not claim generic plain text handling"
+        );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_file_open_tests {
+    use super::{collect_startup_file_paths, FastCsvApp};
+    use eframe::egui;
+    use std::path::{Path, PathBuf};
+
+    fn temp_csv_path(name: &str) -> PathBuf {
+        let unique = format!(
+            "quickcsv-{}-{name}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    #[test]
+    fn collect_startup_file_paths_keeps_existing_files() {
+        let existing = temp_csv_path("existing.csv");
+        std::fs::write(&existing, "name\nalice\n").expect("should create temp csv");
+        let missing = existing.with_file_name("missing.csv");
+
+        let paths = collect_startup_file_paths(
+            vec![
+                std::ffi::OsString::from("quickcsv"),
+                existing.as_os_str().to_os_string(),
+                missing.as_os_str().to_os_string(),
+            ],
+            Path::exists,
+        );
+
+        assert_eq!(paths, vec![existing.clone()]);
+
+        let _ = std::fs::remove_file(existing);
+    }
+
+    #[test]
+    fn open_pending_paths_reuses_empty_tab_then_appends_new_tabs() {
+        let first = temp_csv_path("first.csv");
+        let second = temp_csv_path("second.csv");
+        std::fs::write(&first, "id\n1\n").expect("should create first csv");
+        std::fs::write(&second, "id\n2\n").expect("should create second csv");
+
+        let mut app = FastCsvApp::default();
+        let ctx = egui::Context::default();
+
+        app.open_native_path(first.clone(), &ctx);
+        app.open_native_path(second.clone(), &ctx);
+
+        assert_eq!(app.tabs.len(), 2, "expected one tab per opened file");
+        assert_eq!(
+            app.active_tab_index, 1,
+            "latest opened file should be active"
+        );
+        assert_eq!(app.tabs[0].file_path, first.to_string_lossy());
+        assert_eq!(app.tabs[1].file_path, second.to_string_lossy());
+
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
     }
 }
 
