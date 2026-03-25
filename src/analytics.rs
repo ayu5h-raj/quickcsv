@@ -169,10 +169,7 @@ fn queue_event(payload: serde_json::Value) {
 /// Returns Ok(()) if sent successfully, Err(()) if queued
 #[cfg(not(target_arch = "wasm32"))]
 fn send_or_queue_event(payload: serde_json::Value) -> Result<(), ()> {
-    let url = format!(
-        "{}?measurement_id={}&api_secret={}",
-        GA4_ENDPOINT, MEASUREMENT_ID, API_SECRET
-    );
+    let url = format!("{GA4_ENDPOINT}?measurement_id={MEASUREMENT_ID}&api_secret={API_SECRET}");
 
     // Try to send the request
     // Convert payload to JSON string
@@ -198,7 +195,7 @@ fn send_or_queue_event(payload: serde_json::Value) -> Result<(), ()> {
         } else {
             json_str.clone()
         };
-        eprintln!("[Analytics] Sending event payload: {}", preview);
+        eprintln!("[Analytics] Sending event payload: {preview}");
     }
 
     if result.is_err() {

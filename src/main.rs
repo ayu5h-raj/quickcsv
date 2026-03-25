@@ -224,6 +224,18 @@ extern "C" fn quickcsv_application_open_urls(
 }
 
 #[cfg(target_os = "macos")]
+type MacOsOpenFileMethod =
+    for<'a, 'b, 'c> extern "C" fn(&'a AnyObject, Sel, &'b NSApplication, &'c NSString) -> Bool;
+
+#[cfg(target_os = "macos")]
+type MacOsOpenFilesMethod =
+    for<'a, 'b, 'c> extern "C" fn(&'a AnyObject, Sel, &'b NSApplication, &'c NSArray<NSString>);
+
+#[cfg(target_os = "macos")]
+type MacOsOpenUrlsMethod =
+    for<'a, 'b, 'c> extern "C" fn(&'a AnyObject, Sel, &'b NSApplication, &'c NSArray<NSURL>);
+
+#[cfg(target_os = "macos")]
 fn install_macos_file_open_hooks() {
     let mtm = MainThreadMarker::new().expect("macOS file open hooks require main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -236,25 +248,22 @@ fn install_macos_file_open_hooks() {
         add_delegate_method::<(&NSApplication, &NSString), Bool>(
             delegate_class,
             sel!(application:openFile:),
-            std::mem::transmute(
-                quickcsv_application_open_file
-                    as extern "C" fn(&AnyObject, Sel, &NSApplication, &NSString) -> Bool,
+            std::mem::transmute::<MacOsOpenFileMethod, unsafe extern "C" fn()>(
+                quickcsv_application_open_file as MacOsOpenFileMethod,
             ),
         );
         add_delegate_method::<(&NSApplication, &NSArray<NSString>), ()>(
             delegate_class,
             sel!(application:openFiles:),
-            std::mem::transmute(
-                quickcsv_application_open_files
-                    as extern "C" fn(&AnyObject, Sel, &NSApplication, &NSArray<NSString>),
+            std::mem::transmute::<MacOsOpenFilesMethod, unsafe extern "C" fn()>(
+                quickcsv_application_open_files as MacOsOpenFilesMethod,
             ),
         );
         add_delegate_method::<(&NSApplication, &NSArray<NSURL>), ()>(
             delegate_class,
             sel!(application:openURLs:),
-            std::mem::transmute(
-                quickcsv_application_open_urls
-                    as extern "C" fn(&AnyObject, Sel, &NSApplication, &NSArray<NSURL>),
+            std::mem::transmute::<MacOsOpenUrlsMethod, unsafe extern "C" fn()>(
+                quickcsv_application_open_urls as MacOsOpenUrlsMethod,
             ),
         );
     }
@@ -2983,7 +2992,7 @@ impl FastCsvApp {
             // Header info bar
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("{} columns", num_fields))
+                    egui::RichText::new(format!("{num_fields} columns"))
                         .color(Color32::from_rgb(150, 150, 150)),
                 );
 
@@ -3025,7 +3034,7 @@ impl FastCsvApp {
                                     .headers
                                     .get(i)
                                     .cloned()
-                                    .unwrap_or_else(|| format!("col_{}", i));
+                                    .unwrap_or_else(|| format!("col_{i}"));
                                 json_obj.insert(header, serde_json::Value::String(field.clone()));
                             }
                             if let Ok(json_str) = serde_json::to_string_pretty(&json_obj) {
@@ -3237,7 +3246,7 @@ impl FastCsvApp {
         let current_filter = tab.filter_state.filters.get(&col_idx);
         let has_filter = tab.filter_state.has_filter(col_idx);
 
-        egui::Window::new(format!("Filter: {}", col_name))
+        egui::Window::new(format!("Filter: {col_name}"))
             .resizable(false)
             .collapsible(false)
             .default_width(420.0)
@@ -4977,6 +4986,10 @@ mod plist_tests {
         assert!(
             plist.contains("<string>tsv</string>"),
             "plist should declare tsv extension support"
+        );
+        assert!(
+            !plist.contains("<string>public.plain-text</string>"),
+            "plist should not claim generic plain text handling"
         );
     }
 }

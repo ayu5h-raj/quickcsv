@@ -101,7 +101,7 @@ pub fn check_for_updates(
                         } else if manual {
                             // For manual checks, show "up to date" message
                             *status_msg_clone.write() =
-                                Some(format!("You're up to date! (v{})", CURRENT_VERSION));
+                                Some(format!("You're up to date! (v{CURRENT_VERSION})"));
                             *status_time_clone.write() = Some(Instant::now());
                             ctx.request_repaint();
                         }
