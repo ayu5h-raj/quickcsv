@@ -332,7 +332,7 @@ impl RecentFiles {
     /// Get recent files sorted by most recent first
     fn get_recent(&self) -> Vec<RecentFile> {
         let mut files = self.files.clone();
-        files.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        files.sort_by_key(|f| std::cmp::Reverse(f.timestamp));
         files
     }
 
