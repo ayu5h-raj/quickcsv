@@ -20,8 +20,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Fetch traffic and release data
+        # The traffic API requires push/admin access, which the built-in
+        # GITHUB_TOKEN does NOT grant (it 403s on /traffic/*). A PAT with
+        # "Administration: read" (fine-grained) or "repo" (classic) scope is
+        # required — store it as the TRAFFIC_TOKEN secret. The push step below
+        # still uses the default GITHUB_TOKEN from checkout.
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
         run: |
           gh api "repos/${GITHUB_REPOSITORY}/traffic/views" > views.json
           gh api "repos/${GITHUB_REPOSITORY}/traffic/clones" > clones.json
