@@ -1,0 +1,46 @@
+name: Track Traffic
+
+# GitHub only keeps repo traffic for a rolling 14-day window. This workflow
+# snapshots views/clones daily and appends them to traffic/traffic.csv so we
+# build a permanent history. Runs daily and can be triggered manually.
+on:
+  schedule:
+    - cron: "17 4 * * *" # daily at 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write # commit the updated history back to the repo
+
+jobs:
+  track:
+    name: Snapshot traffic
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Fetch traffic and release data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/traffic/views" > views.json
+          gh api "repos/${GITHUB_REPOSITORY}/traffic/clones" > clones.json
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" > releases.json
+
+      - name: Merge into history
+        run: |
+          python3 scripts/merge_traffic.py views.json clones.json traffic/traffic.csv
+          python3 scripts/snapshot_downloads.py releases.json traffic/downloads.csv
+
+      - name: Commit updated history
+        run: |
+          rm -f views.json clones.json releases.json
+          if git diff --quiet -- traffic/; then
+            echo "No traffic changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add traffic/
+          git commit -m "chore: update traffic history [skip ci]"
+          git push
