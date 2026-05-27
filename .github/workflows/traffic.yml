@@ -8,10 +8,10 @@ on:
     - cron: "17 4 * * *" # daily at 04:17 UTC
   workflow_dispatch:
 
-# Read-only on main; all writes go to the unprotected traffic-data branch via
-# the PAT below, so no elevated permissions are needed here.
+# GITHUB_TOKEN needs write to push the data commit to the (unprotected)
+# traffic-data branch. The PAT is used only to read the traffic API.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   track:
@@ -26,7 +26,9 @@ jobs:
         with:
           ref: traffic-data
           path: data
-          token: ${{ secrets.TRAFFIC_TOKEN }} # PAT so the push below is allowed
+          # Uses the default GITHUB_TOKEN (contents: write) so the push below
+          # is allowed. traffic-data is unprotected, so no PAT push rights are
+          # needed — the read-only TRAFFIC_TOKEN is only for the API fetch.
 
       - name: Fetch traffic and release data
         # The traffic API requires push/admin access, which the built-in
