@@ -1,30 +1,37 @@
 name: Track Traffic
 
 # GitHub only keeps repo traffic for a rolling 14-day window. This workflow
-# snapshots views/clones daily and appends them to traffic/traffic.csv so we
-# build a permanent history. Runs daily and can be triggered manually.
+# snapshots views/clones and release downloads daily and accumulates them on a
+# dedicated `traffic-data` branch (main is PR-only, so we never push to it).
 on:
   schedule:
     - cron: "17 4 * * *" # daily at 04:17 UTC
   workflow_dispatch:
 
+# Read-only on main; all writes go to the unprotected traffic-data branch via
+# the PAT below, so no elevated permissions are needed here.
 permissions:
-  contents: write # commit the updated history back to the repo
+  contents: read
 
 jobs:
   track:
     name: Snapshot traffic
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout scripts
         uses: actions/checkout@v4
+
+      - name: Checkout traffic-data branch
+        uses: actions/checkout@v4
+        with:
+          ref: traffic-data
+          path: data
+          token: ${{ secrets.TRAFFIC_TOKEN }} # PAT so the push below is allowed
 
       - name: Fetch traffic and release data
         # The traffic API requires push/admin access, which the built-in
-        # GITHUB_TOKEN does NOT grant (it 403s on /traffic/*). A PAT with
-        # "Administration: read" (fine-grained) or "repo" (classic) scope is
-        # required — store it as the TRAFFIC_TOKEN secret. The push step below
-        # still uses the default GITHUB_TOKEN from checkout.
+        # GITHUB_TOKEN does NOT grant (it 403s on /traffic/*). The TRAFFIC_TOKEN
+        # PAT needs "Administration: read" (fine-grained) or "repo" (classic).
         env:
           GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
         run: |
@@ -34,12 +41,12 @@ jobs:
 
       - name: Merge into history
         run: |
-          python3 scripts/merge_traffic.py views.json clones.json traffic/traffic.csv
-          python3 scripts/snapshot_downloads.py releases.json traffic/downloads.csv
+          python3 scripts/merge_traffic.py views.json clones.json data/traffic/traffic.csv
+          python3 scripts/snapshot_downloads.py releases.json data/traffic/downloads.csv
 
-      - name: Commit updated history
+      - name: Commit updated history to traffic-data
+        working-directory: data
         run: |
-          rm -f views.json clones.json releases.json
           if git diff --quiet -- traffic/; then
             echo "No traffic changes to commit."
             exit 0
@@ -47,5 +54,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add traffic/
-          git commit -m "chore: update traffic history [skip ci]"
+          git commit -m "chore: update traffic history"
           git push
