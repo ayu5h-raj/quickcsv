@@ -1,0 +1,18 @@
+# Production deployment for the QuickCSV web app on the VPS.
+# Sits behind the existing Traefik reverse proxy (project: traefik-qmwd),
+# which terminates TLS via the `letsencrypt` resolver and redirects HTTP->HTTPS.
+# Traefik runs on the host network and reaches this container over its bridge IP,
+# so no host port needs to be published.
+services:
+  quickcsv:
+    build: .
+    container_name: quickcsv
+    restart: unless-stopped
+    expose:
+      - "80"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.quickcsv.rule=Host(`quickcsv.in`) || Host(`www.quickcsv.in`)"
+      - "traefik.http.routers.quickcsv.entrypoints=websecure"
+      - "traefik.http.routers.quickcsv.tls.certresolver=letsencrypt"
+      - "traefik.http.services.quickcsv.loadbalancer.server.port=80"

@@ -153,6 +153,8 @@ jobs:
           git commit -m "Update QuickCSV to ${VERSION}"
           git push
 
+  # The web app is now self-hosted on the VPS at https://quickcsv.in.
+  # GitHub Pages just redirects there (keeps the old github.io URL working).
   build-deploy-web:
     needs: update-homebrew
     runs-on: ubuntu-latest
@@ -160,24 +162,34 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-          
-      - name: Install Trunk
-        uses: jetli/trunk-action@v0.5.0
-        with:
-          version: 'latest'
-          
-      - name: Build WASM
-        run: trunk build --release --public-url /quickcsv/
-        
-      - name: Add .nojekyll
-        run: touch dist/.nojekyll
-        
-      - name: Deploy to GitHub Pages
+
+      - name: Build redirect page
+        run: |
+          mkdir -p dist
+          touch dist/.nojekyll
+          cat > dist/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>QuickCSV has moved to quickcsv.in</title>
+            <link rel="canonical" href="https://quickcsv.in/">
+            <meta http-equiv="refresh" content="0; url=https://quickcsv.in/">
+            <script>window.location.replace("https://quickcsv.in/");</script>
+            <style>
+              body { font-family: -apple-system, system-ui, sans-serif; background:#202020;
+                     color:#e0e0e0; display:grid; place-items:center; height:100vh; margin:0; }
+              a { color:#4ea1ff; }
+            </style>
+          </head>
+          <body>
+            <p>QuickCSV now lives at <a href="https://quickcsv.in/">quickcsv.in</a> — redirecting…</p>
+          </body>
+          </html>
+          EOF
+
+      - name: Deploy redirect to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
