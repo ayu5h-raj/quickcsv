@@ -153,7 +153,7 @@ jobs:
           git commit -m "Update QuickCSV to ${VERSION}"
           git push
 
-  # The web app is now self-hosted on the VPS at https://quickcsv.in.
+  # The web app is now self-hosted on the VPS at https://www.quickcsv.in.
   # GitHub Pages just redirects there (keeps the old github.io URL working).
   build-deploy-web:
     needs: update-homebrew
@@ -173,10 +173,10 @@ jobs:
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>QuickCSV has moved to quickcsv.in</title>
-            <link rel="canonical" href="https://quickcsv.in/">
-            <meta http-equiv="refresh" content="0; url=https://quickcsv.in/">
-            <script>window.location.replace("https://quickcsv.in/");</script>
+            <title>QuickCSV has moved to www.quickcsv.in</title>
+            <link rel="canonical" href="https://www.quickcsv.in/">
+            <meta http-equiv="refresh" content="0; url=https://www.quickcsv.in/">
+            <script>window.location.replace("https://www.quickcsv.in/");</script>
             <style>
               body { font-family: -apple-system, system-ui, sans-serif; background:#202020;
                      color:#e0e0e0; display:grid; place-items:center; height:100vh; margin:0; }
@@ -184,7 +184,7 @@ jobs:
             </style>
           </head>
           <body>
-            <p>QuickCSV now lives at <a href="https://quickcsv.in/">quickcsv.in</a> — redirecting…</p>
+            <p>QuickCSV now lives at <a href="https://www.quickcsv.in/">www.quickcsv.in</a> — redirecting…</p>
           </body>
           </html>
           EOF

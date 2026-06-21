@@ -6,7 +6,7 @@ A blazing-fast CSV viewer for macOS that handles files from 100MB to 2GB+ with z
 ![Platform](https://img.shields.io/badge/platform-macOS-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-🌐 **Try it in your browser:** [https://ayu5h-raj.github.io/quickcsv/](https://ayu5h-raj.github.io/quickcsv/) *(Note: Web version loads files into RAM, unlike desktop which uses memory-mapped I/O)*
+🌐 **Try it in your browser:** [https://www.quickcsv.in/](https://www.quickcsv.in/) *(Note: Web version loads files into RAM, unlike desktop which uses memory-mapped I/O)*
 
 ## Features
 
@@ -50,7 +50,7 @@ Download the latest `QuickCSV.app` from the [Releases page](https://github.com/a
 
 ### Try Web Version
 
-You can try QuickCSV in your browser at **[https://ayu5h-raj.github.io/quickcsv/](https://ayu5h-raj.github.io/quickcsv/)**.
+You can try QuickCSV in your browser at **[https://www.quickcsv.in/](https://www.quickcsv.in/)**.
 
 > **Note:** The web version is not as efficient as the desktop version due to browser limitations, but it's great for trying out QuickCSV without installation. On a MacBook M2 Air, files typically open in a few seconds.
 
