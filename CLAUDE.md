@@ -112,6 +112,44 @@ trunk build --release
 - Slower build (~2-5 minutes) but smallest WASM output
 - Output in `dist/` directory
 
+## Web Hosting & Deployment
+
+The web version is **self-hosted on a VPS** and served at **https://www.quickcsv.in**
+(apex `quickcsv.in` works too). DNS is managed at Hostinger and points the domain
+at the VPS.
+
+### Architecture
+
+- The app is a static WASM bundle built with `trunk build --release`, served by
+  **nginx** inside a Docker container (see `Dockerfile`).
+- The container sits behind the VPS's existing **Traefik** reverse proxy, which
+  terminates TLS (Let's Encrypt, auto-renewing) and redirects HTTP → HTTPS.
+  Routing is configured via labels in `docker-compose.yml`
+  (`Host(quickcsv.in) || Host(www.quickcsv.in)`).
+- The repo is checked out on the VPS at `/opt/quickcsv`.
+
+### Deploying a new version (manual)
+
+After changes land on `main`, deploy the web app by hand:
+
+```bash
+# SSH into the VPS, then:
+cd /opt/quickcsv
+git pull
+docker compose up -d --build   # rebuilds the WASM bundle and restarts nginx
+docker image prune -f          # optional: reclaim space from the old image
+```
+
+The first build is slow (compiles trunk/wasm-bindgen); later builds reuse Docker
+layer caching and are much faster unless `Cargo.lock` changes.
+
+### GitHub Pages
+
+GitHub Pages no longer hosts the app. The `build-deploy-web` job in `release.yml`
+publishes a small redirect page to `gh-pages` that forwards
+`ayu5h-raj.github.io/quickcsv` → `https://www.quickcsv.in`. The README's "try in
+browser" links point to the domain.
+
 ## Git Workflow
 
 **CRITICAL**: Always create a separate branch for every feature or fix. Never commit directly to main.
