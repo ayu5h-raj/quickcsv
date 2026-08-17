@@ -76,7 +76,7 @@ pub fn find_row_boundary(bytes: &[u8], start: usize) -> Option<usize> {
 /// 3. Pick the delimiter that appears most consistently across lines
 /// 4. Fall back to comma if no clear winner
 pub fn detect_delimiter(bytes: &[u8]) -> u8 {
-    const CANDIDATES: [u8; 4] = [b',', b'\t', b';', b'|'];
+    const CANDIDATES: [u8; 4] = *b",\t;|";
     const MAX_LINES: usize = 5;
     const MAX_BYTES: usize = 10000; // Don't scan too much
 

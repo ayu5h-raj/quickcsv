@@ -2843,7 +2843,7 @@ impl FastCsvApp {
                     .fill(Color32::from_rgb(25, 25, 30))
                     .corner_radius(egui::CornerRadius::same(6))
                     .inner_margin(12.0)
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(50, 50, 60)))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(50, 50, 60)))
                     .show(ui, |ui| {
                         egui::ScrollArea::both()
                             .auto_shrink([false, false])
@@ -3612,7 +3612,7 @@ impl FastCsvApp {
             // Shortcut key badge on the right
             egui::Frame::NONE
                 .fill(Color32::from_rgb(35, 35, 40))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(55, 55, 60)))
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
                 .corner_radius(egui::CornerRadius::same(4))
                 .inner_margin(egui::Margin::symmetric(10, 5))
                 .show(ui, |ui| {
