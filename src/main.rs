@@ -6,6 +6,8 @@
 // Module declarations
 mod analytics;
 mod csv;
+#[cfg(not(target_arch = "wasm32"))]
+mod file_watcher;
 mod state;
 mod update;
 mod utils;
@@ -29,13 +31,15 @@ use std::sync::{mpsc, Arc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
 // Imports from modules
 #[cfg(not(target_arch = "wasm32"))]
 use csv::init_csv_progressive;
+#[cfg(not(target_arch = "wasm32"))]
+use file_watcher::FileWatcher;
 use state::{
     ColumnState, FilterCondition, FilterOperator, FilterState, LoadState, SearchStatus,
     SortDirection, SortState, TabState, MAX_NAV_ROWS,
@@ -361,6 +365,9 @@ struct FastCsvApp {
     /// Whether window has been expanded after file load
     #[allow(dead_code)] // Used in native code only
     window_expanded: bool,
+    /// Watches open files for external changes and queues auto-reloads
+    #[cfg(not(target_arch = "wasm32"))]
+    file_watcher: Option<FileWatcher>,
     /// Whether keyboard shortcuts dialog is open
     shortcuts_dialog_open: bool,
     /// Channel for receiving loaded file data from async web tasks (WASM)
@@ -387,6 +394,8 @@ impl Default for FastCsvApp {
             recent_files: RecentFiles::default(),
             recent_files_loaded: false,
             window_expanded: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            file_watcher: None,
             shortcuts_dialog_open: false,
             #[cfg(target_arch = "wasm32")]
             file_loader_tx: tx,
@@ -657,7 +666,23 @@ impl FastCsvApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn load_file(&mut self, path: PathBuf, ctx: egui::Context) {
         self.ensure_tabs();
-        let tab = self.active_tab_mut();
+        let idx = self.active_tab_index;
+        self.load_file_into_tab(idx, path.clone(), ctx);
+        self.register_file_watcher(&path);
+        let name = self.tabs[idx].file_name.clone();
+        self.recent_files
+            .add_file(path.to_string_lossy().to_string(), name);
+        self.save_recent_files();
+    }
+
+    /// Load a CSV file into a specific tab in the background (Native)
+    ///
+    /// Shared by initial opens and auto-reloads when a file changes on disk.
+    /// Does not touch recent files or the file watcher - callers handle that.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_file_into_tab(&mut self, idx: usize, path: PathBuf, ctx: egui::Context) {
+        self.ensure_tabs();
+        let tab = &mut self.tabs[idx];
 
         // Reset state
         tab.scroll_y = 0.0;
@@ -724,10 +749,6 @@ impl FastCsvApp {
         tab.file_path = path_str.clone();
         tab.file_name = file_name.clone();
 
-        // Add to recent files
-        self.recent_files.add_file(path_str, file_name);
-        self.save_recent_files();
-
         // Start progressive loading - shows data immediately while indexing continues
         thread::spawn(move || {
             let result = init_csv_progressive(&path_clone, &state, &ctx);
@@ -739,6 +760,62 @@ impl FastCsvApp {
                 ctx.request_repaint();
             }
         });
+    }
+
+    /// Register a loaded file with the watcher so external changes trigger a reload
+    #[cfg(not(target_arch = "wasm32"))]
+    fn register_file_watcher(&mut self, path: &Path) {
+        if let Some(watcher) = self.file_watcher.as_mut() {
+            watcher.register(path);
+        }
+    }
+
+    /// Initialize the file watcher with the UI context so events wake the UI thread
+    #[cfg(not(target_arch = "wasm32"))]
+    fn init_file_watcher(&mut self, ctx: egui::Context) {
+        self.file_watcher = FileWatcher::new(ctx).ok();
+    }
+
+    /// Stop watching a file (e.g. when its tab is closed)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn unregister_file_watcher(&mut self, path: &str) {
+        if let Some(watcher) = self.file_watcher.as_mut() {
+            watcher.unregister(Path::new(path));
+        }
+    }
+
+    /// Reload tabs whose file changed on disk (Native)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reload_files_externally_changed(&mut self, ctx: &egui::Context) {
+        self.ensure_tabs();
+        let changed = {
+            let Some(watcher) = self.file_watcher.as_mut() else {
+                return;
+            };
+            watcher.changed_files(Instant::now())
+        };
+        if changed.is_empty() {
+            return;
+        }
+
+        // Collect target tabs first, then reload to avoid borrowing issues.
+        let mut targets = Vec::new();
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            if tab.file_path.is_empty() {
+                continue;
+            }
+            let path = PathBuf::from(&tab.file_path);
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            if changed.contains(&canonical) {
+                targets.push((idx, path));
+            }
+        }
+        for (idx, path) in targets {
+            self.load_file_into_tab(idx, path.clone(), ctx.clone());
+            self.register_file_watcher(&path);
+        }
     }
 
     /// Increment filter version to trigger recompute
@@ -1537,6 +1614,15 @@ impl FastCsvApp {
 
         let idx = self.active_tab_index;
 
+        // Stop watching the file being closed
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = self.tabs[idx].file_path.clone();
+            if !path.is_empty() {
+                self.unregister_file_watcher(&path);
+            }
+        }
+
         // Adjust active tab index
         if idx > 0 {
             self.active_tab_index = idx - 1;
@@ -1633,6 +1719,14 @@ impl FastCsvApp {
         for idx in tabs_to_close {
             if self.tabs.len() <= 1 {
                 break;
+            }
+            // Stop watching the file being closed
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let path = self.tabs[idx].file_path.clone();
+                if !path.is_empty() {
+                    self.unregister_file_watcher(&path);
+                }
             }
             if idx < self.active_tab_index {
                 self.active_tab_index -= 1;
@@ -4006,7 +4100,11 @@ impl eframe::App for FastCsvApp {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        self.consume_pending_native_open_paths(ctx);
+        {
+            self.consume_pending_native_open_paths(ctx);
+            // Reload any open files that changed on disk
+            self.reload_files_externally_changed(ctx);
+        }
 
         // Check for updates on startup (only once)
         if !self.update_state.check_initiated {
@@ -4781,6 +4879,7 @@ fn main() -> eframe::Result<()> {
 
             // Load recent files from storage
             let mut app = FastCsvApp::default();
+            app.init_file_watcher(cc.egui_ctx.clone());
             app.load_recent_files();
             app.recent_files_loaded = true;
             app.consume_pending_native_open_paths(&cc.egui_ctx);
@@ -5096,6 +5195,64 @@ mod native_file_open_tests {
 
         let _ = std::fs::remove_file(first);
         let _ = std::fs::remove_file(second);
+    }
+
+    #[test]
+    fn external_file_change_triggers_tab_reload() {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let file = temp_csv_path("reload.csv");
+        std::fs::write(&file, "name\nalice\n").expect("should create csv");
+
+        let mut app = FastCsvApp::default();
+        let ctx = egui::Context::default();
+        app.init_file_watcher(ctx.clone());
+        app.open_native_path(file.clone(), &ctx);
+
+        // Wait for the initial load to finish indexing (1 data row).
+        let initial_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let done = {
+                let state = app.tabs[0].state.read();
+                state.indexing_complete.load(Ordering::Relaxed)
+            };
+            if done {
+                break;
+            }
+            assert!(
+                Instant::now() < initial_deadline,
+                "initial load did not finish indexing in time"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Modify the file externally, then drive the update loop until the
+        // reload lands and the new rows are visible.
+        std::fs::write(&file, "name\nbob\ncarol\ndave\n").expect("should overwrite csv");
+
+        let reload_deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            app.reload_files_externally_changed(&ctx);
+            let rows = {
+                let state = app.tabs[0].state.read();
+                state
+                    .csv
+                    .as_ref()
+                    .map(|c| c.indexed_row_count())
+                    .unwrap_or(0)
+            };
+            if rows >= 3 {
+                break; // New content (3 data rows) has been picked up.
+            }
+            assert!(
+                Instant::now() < reload_deadline,
+                "external change was not picked up after reload; rows = {rows}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let _ = std::fs::remove_file(file);
     }
 }
 
