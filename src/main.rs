@@ -6,6 +6,8 @@
 // Module declarations
 mod analytics;
 mod csv;
+#[cfg(not(target_arch = "wasm32"))]
+mod file_watcher;
 mod state;
 mod update;
 mod utils;
@@ -29,16 +31,20 @@ use std::sync::{mpsc, Arc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
 // Imports from modules
 #[cfg(not(target_arch = "wasm32"))]
 use csv::init_csv_progressive;
+#[cfg(not(target_arch = "wasm32"))]
+use file_watcher::FileWatcher;
+#[cfg(not(target_arch = "wasm32"))]
+use state::ExternalReloadState;
 use state::{
     ColumnState, FilterCondition, FilterOperator, FilterState, LoadState, SearchStatus,
-    SortDirection, SortState, TabState, MAX_NAV_ROWS,
+    SharedState, SortDirection, SortState, TabState, MAX_NAV_ROWS,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use update::check_for_updates;
@@ -361,14 +367,20 @@ struct FastCsvApp {
     /// Whether window has been expanded after file load
     #[allow(dead_code)] // Used in native code only
     window_expanded: bool,
+    /// Watches open files for external changes and queues auto-reloads
+    #[cfg(not(target_arch = "wasm32"))]
+    file_watcher: Option<FileWatcher>,
+    /// Non-fatal watcher setup error shown in the status bar
+    #[cfg(not(target_arch = "wasm32"))]
+    file_watcher_error: Option<String>,
     /// Whether keyboard shortcuts dialog is open
     shortcuts_dialog_open: bool,
     /// Channel for receiving loaded file data from async web tasks (WASM)
     #[cfg(target_arch = "wasm32")]
-    file_loader_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
+    file_loader_tx: std::sync::mpsc::Sender<(u64, u64, String, Vec<u8>)>,
     /// Channel receiver for file data (WASM)
     #[cfg(target_arch = "wasm32")]
-    file_loader_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
+    file_loader_rx: std::sync::mpsc::Receiver<(u64, u64, String, Vec<u8>)>,
 }
 
 impl Default for FastCsvApp {
@@ -387,6 +399,10 @@ impl Default for FastCsvApp {
             recent_files: RecentFiles::default(),
             recent_files_loaded: false,
             window_expanded: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            file_watcher: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            file_watcher_error: None,
             shortcuts_dialog_open: false,
             #[cfg(target_arch = "wasm32")]
             file_loader_tx: tx,
@@ -506,7 +522,9 @@ impl FastCsvApp {
         // Clone what we need before getting mutable borrow
         let tx = self.file_loader_tx.clone();
         let tab = self.active_tab_mut();
-        let state = tab.state.clone();
+        let tab_id = tab.id;
+        tab.load_generation = tab.load_generation.wrapping_add(1);
+        let generation = tab.load_generation;
         let ctx = ctx.clone();
 
         let task = rfd::AsyncFileDialog::new()
@@ -515,18 +533,11 @@ impl FastCsvApp {
 
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(file) = task.await {
-                // Show loading state only after user selects a file
-                {
-                    let mut state_guard = state.write();
-                    state_guard.load_state = LoadState::Indexing;
-                }
-                ctx.request_repaint();
-
                 let name = file.file_name();
                 let bytes = file.read().await;
 
                 // Send to main thread for processing via channel
-                if tx.send((name, bytes)).is_err() {
+                if tx.send((tab_id, generation, name, bytes)).is_err() {
                     web_sys::console::error_1(&"Failed to send file data".into());
                 }
 
@@ -537,33 +548,50 @@ impl FastCsvApp {
 
     /// Process a loaded file (WASM) - called from update() when channel receives data
     #[cfg(target_arch = "wasm32")]
-    fn load_file_web(&mut self, name: String, bytes: Vec<u8>, ctx: egui::Context) {
+    fn load_file_web(
+        &mut self,
+        tab_id: u64,
+        generation: u64,
+        name: String,
+        bytes: Vec<u8>,
+        ctx: egui::Context,
+    ) {
         self.ensure_tabs();
-        let tab = self.active_tab_mut();
+        let Some(tab_idx) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let tab = &mut self.tabs[tab_idx];
+        if tab.load_generation != generation {
+            return;
+        }
+        tab.cancel_workers();
+        tab.state = Arc::new(parking_lot::RwLock::new(SharedState::default()));
+        tab.index_cancel_flag = Arc::new(AtomicBool::new(false));
 
         // Reset state
         tab.scroll_y = 0.0;
         tab.scroll_x = 0.0;
         tab.column_widths.clear();
+        tab.loaded_headers.clear();
         tab.row_cache.clear();
         tab.last_visible_range = (0, 0);
         tab.sort_state = SortState::default();
         tab.column_state = ColumnState::default();
         tab.filter_state = FilterState::default();
         tab.filtered_indices = None;
+        tab.filter_receiver = None;
+        tab.is_filtering = Arc::new(AtomicBool::new(false));
+        tab.filter_cancel_flag = Arc::new(AtomicBool::new(false));
         tab.applied_filters.clear();
         tab.applied_sort_column = None;
-        tab.search.cancel_flag.store(true, Ordering::SeqCst);
-        tab.search.current_index = 0;
-        tab.search.active_query.clear();
-        {
-            let mut results = tab.search.results.write();
-            results.navigation_rows.clear();
-            results.total_match_count = 0;
-            results.status = SearchStatus::Idle;
-            results.rows_searched = 0;
-            results.nav_limit_reached = false;
-        }
+        tab.applied_sort_direction = SortDirection::None;
+        tab.filter_duration = None;
+        tab.search = state::SearchState::default();
+        tab.json_viewer = state::JsonViewerState::default();
+        tab.row_detail = state::RowDetailState::default();
+        tab.go_to_row = state::GoToRowState::default();
+        tab.total_row_count = 0;
+        tab.was_sorting = false;
 
         // Set loading state
         {
@@ -572,7 +600,6 @@ impl FastCsvApp {
             state_guard.load_state = LoadState::Indexing;
             state_guard.error_message = None;
             state_guard.rows_indexed.store(0, Ordering::Relaxed);
-            state_guard.cancel_indexing.store(false, Ordering::Relaxed);
             state_guard
                 .indexing_complete
                 .store(false, Ordering::Relaxed);
@@ -591,6 +618,12 @@ impl FastCsvApp {
             // Update tab file info
             tab.file_path = name.clone();
             tab.file_name = name.clone();
+            tab.loaded_headers = state
+                .read()
+                .csv
+                .as_ref()
+                .map(|csv| csv.headers.clone())
+                .unwrap_or_default();
             // Add to recent files
             self.recent_files.add_file(name.clone(), name);
             self.save_recent_files();
@@ -601,13 +634,6 @@ impl FastCsvApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn open_file(&mut self, ctx: &egui::Context) {
         self.ensure_tabs();
-        let tab = self.active_tab_mut();
-
-        // Cancel any ongoing indexing
-        {
-            let state = tab.state.read();
-            state.cancel_indexing.store(true, Ordering::Relaxed);
-        }
 
         // Open native file dialog
         if let Some(path) = rfd::FileDialog::new()
@@ -657,62 +683,76 @@ impl FastCsvApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn load_file(&mut self, path: PathBuf, ctx: egui::Context) {
         self.ensure_tabs();
-        let tab = self.active_tab_mut();
+        let idx = self.active_tab_index;
+        self.register_file_watcher(idx, &path);
+        if let Some(watcher) = self.file_watcher.as_mut() {
+            watcher.begin_snapshot(&path, Instant::now());
+        }
+        self.load_file_into_tab(idx, path.clone(), ctx);
+        let name = self.tabs[idx].file_name.clone();
+        self.recent_files
+            .add_file(path.to_string_lossy().to_string(), name);
+        self.save_recent_files();
+    }
 
-        // Reset state
-        tab.scroll_y = 0.0;
-        tab.scroll_x = 0.0;
-        tab.column_widths.clear();
-        tab.row_cache.clear();
-        tab.last_visible_range = (0, 0);
-        // Reset sort state
-        tab.sort_state = SortState::default();
-        // Reset column state (visibility, order)
-        tab.column_state = ColumnState::default();
-        // Reset filter state (no persistence - filters are session-only)
-        tab.filter_state = FilterState::default();
-        tab.filtered_indices = None;
-        // Reset file tracking flag for new file
-        #[cfg(not(target_arch = "wasm32"))]
+    /// Load a CSV file into a specific tab in the background (Native)
+    ///
+    /// Shared by initial opens and auto-reloads when a file changes on disk.
+    /// Does not touch recent files or the file watcher - callers handle that.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_file_into_tab(&mut self, idx: usize, path: PathBuf, ctx: egui::Context) {
+        self.ensure_tabs();
         {
+            let tab = &mut self.tabs[idx];
+            tab.cancel_workers();
+            tab.state = Arc::new(parking_lot::RwLock::new(SharedState::default()));
+            tab.index_cancel_flag = Arc::new(AtomicBool::new(false));
+            tab.scroll_y = 0.0;
+            tab.scroll_x = 0.0;
+            tab.column_widths.clear();
+            tab.loaded_headers.clear();
+            tab.row_cache.clear();
+            tab.last_visible_range = (0, 0);
+            tab.sort_state = SortState::default();
+            tab.column_state = ColumnState::default();
+            tab.filter_state = FilterState::default();
+            tab.filtered_indices = None;
+            tab.filter_version = 0;
+            tab.last_filter_version = 0;
+            tab.filter_receiver = None;
+            tab.is_filtering = Arc::new(AtomicBool::new(false));
+            tab.filter_cancel_flag = Arc::new(AtomicBool::new(false));
+            tab.applied_filters.clear();
+            tab.applied_sort_column = None;
+            tab.applied_sort_direction = SortDirection::None;
+            tab.filter_duration = None;
+            tab.search = state::SearchState::default();
+            tab.json_viewer = state::JsonViewerState::default();
+            tab.row_detail = state::RowDetailState::default();
+            tab.go_to_row = state::GoToRowState::default();
+            tab.total_row_count = 0;
+            tab.was_sorting = false;
             tab.file_tracked = false;
+            tab.external_reload = None;
         }
+        self.start_tab_load(idx, path, ctx);
+    }
 
-        // Get path string for file info
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_tab_load(&mut self, idx: usize, path: PathBuf, ctx: egui::Context) {
         let path_str = path.to_string_lossy().to_string();
-        tab.filter_version = 0;
-        tab.last_filter_version = 0;
-        tab.filter_receiver = None;
-        tab.is_filtering.store(false, Ordering::Relaxed);
-        tab.applied_filters.clear();
-        tab.applied_sort_column = None;
-        tab.applied_sort_direction = SortDirection::None;
-        tab.filter_duration = None;
-        // Cancel any ongoing search and clear results
-        tab.search.cancel_flag.store(true, Ordering::SeqCst);
-        tab.search.current_index = 0;
-        tab.search.active_query.clear();
-        {
-            let mut results = tab.search.results.write();
-            results.navigation_rows.clear();
-            results.total_match_count = 0;
-            results.status = SearchStatus::Idle;
-            results.rows_searched = 0;
-            results.nav_limit_reached = false;
-        }
-
-        // Set loading state
+        let tab = &mut self.tabs[idx];
+        let state = Arc::clone(&tab.state);
+        let index_cancel_flag = Arc::clone(&tab.index_cancel_flag);
+        let progressive = tab.external_reload.is_none();
         {
             let mut state = tab.state.write();
             state.csv = None;
             state.load_state = LoadState::Indexing;
             state.error_message = None;
             state.rows_indexed.store(0, Ordering::Relaxed);
-            state.cancel_indexing.store(false, Ordering::Relaxed);
             state.indexing_complete.store(false, Ordering::Relaxed);
         }
-
-        let state = Arc::clone(&tab.state);
         let path_clone = path.clone();
         let file_name = path
             .file_name()
@@ -724,13 +764,10 @@ impl FastCsvApp {
         tab.file_path = path_str.clone();
         tab.file_name = file_name.clone();
 
-        // Add to recent files
-        self.recent_files.add_file(path_str, file_name);
-        self.save_recent_files();
-
         // Start progressive loading - shows data immediately while indexing continues
         thread::spawn(move || {
-            let result = init_csv_progressive(&path_clone, &state, &ctx);
+            let result =
+                init_csv_progressive(&path_clone, &state, &index_cancel_flag, &ctx, progressive);
 
             if let Err(e) = result {
                 let mut state_guard = state.write();
@@ -739,6 +776,248 @@ impl FastCsvApp {
                 ctx.request_repaint();
             }
         });
+    }
+
+    /// Register a loaded file with the watcher so external changes trigger a reload
+    #[cfg(not(target_arch = "wasm32"))]
+    fn register_file_watcher(&mut self, tab_idx: usize, path: &Path) {
+        let Some(watcher) = self.file_watcher.as_mut() else {
+            return;
+        };
+        match watcher.register(path) {
+            Some(registration) => {
+                self.tabs[tab_idx].watch_registration = Some(registration);
+                self.tabs[tab_idx].watch_registration_failed = false;
+            }
+            None => {
+                self.tabs[tab_idx].watch_registration = None;
+                self.tabs[tab_idx].watch_registration_failed = true;
+            }
+        }
+    }
+
+    /// Initialize the file watcher with the UI context so events wake the UI thread
+    #[cfg(not(target_arch = "wasm32"))]
+    fn init_file_watcher(&mut self, ctx: egui::Context) {
+        match FileWatcher::new(ctx) {
+            Ok(watcher) => {
+                self.file_watcher = Some(watcher);
+                self.file_watcher_error = None;
+            }
+            Err(error) => {
+                self.file_watcher = None;
+                self.file_watcher_error = Some(format!("Auto-reload unavailable: {error}"));
+            }
+        }
+    }
+
+    /// Stop watching a file (e.g. when its tab is closed)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn unregister_tab_file_watcher(&mut self, tab_idx: usize) {
+        let path = PathBuf::from(&self.tabs[tab_idx].file_path);
+        let registration = self.tabs[tab_idx].watch_registration.take();
+        self.tabs[tab_idx].watch_registration_failed = false;
+        if let (Some(watcher), Some(registration)) = (self.file_watcher.as_mut(), registration) {
+            watcher.unregister(&registration, &path);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sync_loaded_headers(&mut self) {
+        for tab in &mut self.tabs {
+            let Some(headers) = tab
+                .state
+                .try_read()
+                .and_then(|state| state.csv.as_ref().map(|csv| csv.headers.clone()))
+            else {
+                continue;
+            };
+            tab.loaded_headers = headers;
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn suspend_tabs_for_path(&mut self, path: &Path) {
+        for tab in self
+            .tabs
+            .iter_mut()
+            .filter(|tab| Path::new(&tab.file_path) == path)
+        {
+            tab.cancel_workers();
+            if tab.external_reload.is_none() {
+                let headers = tab
+                    .state
+                    .try_read()
+                    .and_then(|state| state.csv.as_ref().map(|csv| csv.headers.clone()))
+                    .or_else(|| {
+                        (!tab.loaded_headers.is_empty()).then(|| tab.loaded_headers.clone())
+                    });
+                tab.external_reload = Some(ExternalReloadState {
+                    headers,
+                    sort_column: tab.sort_state.column,
+                    sort_direction: tab.sort_state.direction,
+                });
+            }
+
+            let pending_state = SharedState {
+                load_state: LoadState::ReloadPending,
+                ..SharedState::default()
+            };
+            tab.state = Arc::new(parking_lot::RwLock::new(pending_state));
+            tab.index_cancel_flag = Arc::new(AtomicBool::new(false));
+
+            tab.sort_state = SortState::default();
+            tab.filter_cancel_flag = Arc::new(AtomicBool::new(false));
+            tab.is_filtering = Arc::new(AtomicBool::new(false));
+            tab.filter_receiver = None;
+            tab.filtered_indices = None;
+            tab.applied_filters.clear();
+            tab.applied_sort_column = None;
+            tab.applied_sort_direction = SortDirection::None;
+            tab.filter_duration = None;
+            tab.last_filter_version = tab.filter_version;
+            tab.row_cache.clear();
+            tab.last_visible_range = (0, 0);
+            tab.total_row_count = 0;
+            tab.was_sorting = false;
+
+            tab.search.cancel_flag = Arc::new(AtomicBool::new(false));
+            tab.search.results = Arc::new(parking_lot::RwLock::new(Default::default()));
+            tab.search.visible = false;
+            tab.search.focus_input = false;
+            tab.search.query.clear();
+            tab.search.active_query.clear();
+            tab.search.current_index = 0;
+            tab.search.scroll_to_row = None;
+            tab.search.history_index = None;
+            tab.search.history_temp_query.clear();
+
+            tab.json_viewer = state::JsonViewerState::default();
+            tab.row_detail = state::RowDetailState::default();
+            tab.go_to_row = state::GoToRowState::default();
+            tab.column_state.manager_open = false;
+            tab.column_state.dragged_column = None;
+            tab.filter_state.active_popup = None;
+            tab.filter_state.manager_open = false;
+            tab.filter_state.focus_input = false;
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn begin_external_reload(&mut self, path: &Path, ctx: &egui::Context) {
+        if let Some(watcher) = self.file_watcher.as_mut() {
+            watcher.begin_snapshot(path, Instant::now());
+        }
+        let targets: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| Path::new(&tab.file_path) == path)
+            .map(|(idx, _)| idx)
+            .collect();
+        for idx in targets {
+            self.start_tab_load(idx, path.to_path_buf(), ctx.clone());
+        }
+    }
+
+    /// Suspend changed mappings immediately, then reload at the trailing edge.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reload_files_externally_changed(&mut self, ctx: &egui::Context) {
+        self.ensure_tabs();
+        let batch = {
+            let Some(watcher) = self.file_watcher.as_mut() else {
+                return;
+            };
+            watcher.poll(Instant::now())
+        };
+        if let Some(delay) = batch.next_check {
+            ctx.request_repaint_after(delay);
+        }
+        for path in &batch.suspend {
+            self.suspend_tabs_for_path(path);
+        }
+        for path in &batch.reload {
+            self.begin_external_reload(path, ctx);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finalize_active_external_reload(&mut self, ctx: &egui::Context) {
+        self.ensure_tabs();
+        let idx = self.active_tab_index;
+        let ready = {
+            let tab = &self.tabs[idx];
+            if tab.external_reload.is_none() {
+                return;
+            }
+            let state = tab.state.read();
+            state.indexing_complete.load(Ordering::Acquire)
+                && matches!(state.load_state, LoadState::Ready)
+        };
+        if !ready {
+            return;
+        }
+
+        let new_headers = {
+            let state = self.tabs[idx].state.read();
+            state
+                .csv
+                .as_ref()
+                .map(|csv| csv.headers.clone())
+                .unwrap_or_default()
+        };
+        self.tabs[idx].loaded_headers = new_headers.clone();
+        let reload = self.tabs[idx]
+            .external_reload
+            .take()
+            .expect("reload state checked above");
+        let same_schema = reload
+            .headers
+            .as_ref()
+            .is_some_and(|headers| headers == &new_headers);
+        let mut restore_sort = None;
+        let has_filters;
+        {
+            let tab = &mut self.tabs[idx];
+            if same_schema {
+                if let Some(column) = reload
+                    .sort_column
+                    .filter(|column| *column < new_headers.len())
+                {
+                    if reload.sort_direction != SortDirection::None {
+                        restore_sort = Some((column, reload.sort_direction));
+                    }
+                }
+            } else {
+                tab.column_widths.clear();
+                tab.column_state = ColumnState::default();
+                tab.filter_state = FilterState::default();
+                tab.sort_state = SortState::default();
+                tab.filtered_indices = None;
+            }
+            has_filters = tab.filter_state.has_active_filters();
+        }
+
+        if let Some((column, direction)) = restore_sort {
+            {
+                let tab = &mut self.tabs[idx];
+                match direction {
+                    SortDirection::Ascending => {
+                        tab.sort_state.column = None;
+                        tab.sort_state.direction = SortDirection::None;
+                    }
+                    SortDirection::Descending => {
+                        tab.sort_state.column = Some(column);
+                        tab.sort_state.direction = SortDirection::Ascending;
+                    }
+                    SortDirection::None => {}
+                }
+            }
+            self.sort_by_column(column, ctx);
+        }
+        if has_filters {
+            self.mark_filter_changed();
+        }
     }
 
     /// Increment filter version to trigger recompute
@@ -755,6 +1034,10 @@ impl FastCsvApp {
         self.ensure_tabs();
         let tab = self.active_tab_mut();
 
+        tab.filter_cancel_flag.store(true, Ordering::Release);
+        tab.filter_receiver = None;
+        tab.is_filtering = Arc::new(AtomicBool::new(false));
+
         // If no filters are active, clear filtered indices immediately
         if !tab.filter_state.has_active_filters() {
             tab.filtered_indices = None;
@@ -763,18 +1046,8 @@ impl FastCsvApp {
             return;
         }
 
-        // Track filter applied event
-        let filter_count = tab.filter_state.filters.len();
-        analytics::track_filter_applied(filter_count);
-
-        // Check if we are already filtering
-        if tab.is_filtering.load(Ordering::Relaxed) {
-            // If already filtering, maybe we should cancel previous?
-            // For now, simple implementation: just start new one, late comer wins visually
-            // but cleaner would be cancellation.
-        }
-
-        tab.is_filtering.store(true, Ordering::Relaxed);
+        tab.filter_cancel_flag = Arc::new(AtomicBool::new(false));
+        tab.is_filtering = Arc::new(AtomicBool::new(true));
         tab.last_filter_version = tab.filter_version;
 
         // Clone state for thread
@@ -817,6 +1090,7 @@ impl FastCsvApp {
         tab.filter_receiver = Some(receiver);
 
         let is_filtering = tab.is_filtering.clone();
+        let cancel_flag = Arc::clone(&tab.filter_cancel_flag);
 
         // Spawn thread
         #[cfg(not(target_arch = "wasm32"))]
@@ -841,6 +1115,10 @@ impl FastCsvApp {
                         if let Some(initial) = initial_indices {
                             // OPTIMIZATION: Iterate only over previously filtered rows
                             for &row_idx in initial.iter() {
+                                if cancel_flag.load(Ordering::Acquire) {
+                                    is_filtering.store(false, Ordering::Relaxed);
+                                    return;
+                                }
                                 if row_idx < total_rows {
                                     if let Some(fields) = csv.parse_row(row_idx) {
                                         if filter_state.row_matches(&fields) {
@@ -852,6 +1130,10 @@ impl FastCsvApp {
                         } else if let Some(sorted) = sorted_indices {
                             // Iterate in sorted order
                             for &row_idx in sorted.iter() {
+                                if cancel_flag.load(Ordering::Acquire) {
+                                    is_filtering.store(false, Ordering::Relaxed);
+                                    return;
+                                }
                                 if row_idx < total_rows {
                                     if let Some(fields) = csv.parse_row(row_idx) {
                                         if filter_state.row_matches(&fields) {
@@ -863,6 +1145,10 @@ impl FastCsvApp {
                         } else {
                             // Iterate in natural order
                             for row_idx in 0..total_rows {
+                                if cancel_flag.load(Ordering::Acquire) {
+                                    is_filtering.store(false, Ordering::Relaxed);
+                                    return;
+                                }
                                 if let Some(fields) = csv.parse_row(row_idx) {
                                     if filter_state.row_matches(&fields) {
                                         indices.push(row_idx);
@@ -929,6 +1215,10 @@ impl FastCsvApp {
 
                     let mut _processed = 0;
                     for chunk in rows_to_check.chunks(BATCH_SIZE) {
+                        if cancel_flag.load(Ordering::Acquire) {
+                            is_filtering.store(false, Ordering::Relaxed);
+                            return;
+                        }
                         let mut batch_indices = Vec::new();
                         {
                             let state_guard = state.read();
@@ -1031,45 +1321,45 @@ impl FastCsvApp {
         // Spawn background sorting thread
         #[cfg(not(target_arch = "wasm32"))]
         thread::spawn(move || {
-            let state_guard = state.read();
-            let csv = match &state_guard.csv {
-                Some(csv) => csv,
-                None => {
-                    is_sorting.store(false, Ordering::SeqCst);
-                    return;
+            let mut row_data = {
+                let state_guard = state.read();
+                let csv = match &state_guard.csv {
+                    Some(csv) => csv,
+                    None => {
+                        is_sorting.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                };
+                const MAX_SORT_ROWS: usize = 100_000;
+                let rows_to_sort = csv.indexed_row_count().min(MAX_SORT_ROWS);
+                let mut row_data: Vec<(usize, String)> = Vec::with_capacity(rows_to_sort);
+                for row_idx in 0..rows_to_sort {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        is_sorting.store(false, Ordering::SeqCst);
+                        return;
+                    }
+
+                    if let Some(fields) = csv.parse_row(row_idx) {
+                        let value = fields.get(col_idx).cloned().unwrap_or_default();
+                        row_data.push((row_idx, value));
+                    }
+
+                    if row_idx % 5000 == 0 {
+                        let pct = (row_idx * 50) / rows_to_sort;
+                        progress.store(pct, Ordering::Relaxed);
+                        ctx.request_repaint();
+                    }
                 }
+                row_data
             };
-
-            let total_rows = csv.indexed_row_count();
-
-            // For very large files, limit sorting for performance
-            const MAX_SORT_ROWS: usize = 100_000;
-            let rows_to_sort = total_rows.min(MAX_SORT_ROWS);
-
-            // Collect row data for sorting (with progress updates)
-            let mut row_data: Vec<(usize, String)> = Vec::with_capacity(rows_to_sort);
-            for row_idx in 0..rows_to_sort {
-                // Check for cancellation
-                if cancel_flag.load(Ordering::Relaxed) {
-                    is_sorting.store(false, Ordering::SeqCst);
-                    return;
-                }
-
-                if let Some(fields) = csv.parse_row(row_idx) {
-                    let value = fields.get(col_idx).cloned().unwrap_or_default();
-                    row_data.push((row_idx, value));
-                }
-
-                // Update progress (collection phase = 0-50%)
-                if row_idx % 5000 == 0 {
-                    let pct = (row_idx * 50) / rows_to_sort;
-                    progress.store(pct, Ordering::Relaxed);
-                    ctx.request_repaint();
-                }
-            }
 
             progress.store(50, Ordering::Relaxed);
             ctx.request_repaint();
+
+            if cancel_flag.load(Ordering::Acquire) {
+                is_sorting.store(false, Ordering::SeqCst);
+                return;
+            }
 
             // Sort by column value
             match new_direction {
@@ -1537,6 +1827,12 @@ impl FastCsvApp {
 
         let idx = self.active_tab_index;
 
+        self.tabs[idx].cancel_workers();
+
+        // Stop watching the file being closed
+        #[cfg(not(target_arch = "wasm32"))]
+        self.unregister_tab_file_watcher(idx);
+
         // Adjust active tab index
         if idx > 0 {
             self.active_tab_index = idx - 1;
@@ -1634,6 +1930,10 @@ impl FastCsvApp {
             if self.tabs.len() <= 1 {
                 break;
             }
+            self.tabs[idx].cancel_workers();
+            // Stop watching the file being closed
+            #[cfg(not(target_arch = "wasm32"))]
+            self.unregister_tab_file_watcher(idx);
             if idx < self.active_tab_index {
                 self.active_tab_index -= 1;
             } else if idx == self.active_tab_index {
@@ -1959,7 +2259,7 @@ impl FastCsvApp {
         }
 
         // Recompute filtered indices if filter changed
-        if filter_changed {
+        if filter_changed && !is_sorting {
             self.start_async_filtering(ui.ctx());
         }
 
@@ -2589,6 +2889,10 @@ impl FastCsvApp {
                 LoadState::Empty => {
                     ui.label("No file loaded");
                 }
+                LoadState::ReloadPending => {
+                    ui.spinner();
+                    ui.label("File changed - waiting for save to finish...");
+                }
                 LoadState::Indexing => {
                     let rows = state.rows_indexed.load(Ordering::Relaxed);
                     ui.spinner();
@@ -2636,6 +2940,25 @@ impl FastCsvApp {
                     ui.colored_label(
                         egui::Color32::RED,
                         state.error_message.as_deref().unwrap_or("Unknown error"),
+                    );
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(error) = &self.file_watcher_error {
+                ui.separator();
+                ui.colored_label(egui::Color32::YELLOW, error);
+            } else {
+                let failures = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.watch_registration_failed)
+                    .count();
+                if failures > 0 {
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("Auto-reload unavailable for {failures} file(s)"),
                     );
                 }
             }
@@ -2749,7 +3072,7 @@ impl FastCsvApp {
                     .fill(Color32::from_rgb(25, 25, 30))
                     .corner_radius(egui::CornerRadius::same(6))
                     .inner_margin(12.0)
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(50, 50, 60)))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(50, 50, 60)))
                     .show(ui, |ui| {
                         egui::ScrollArea::both()
                             .auto_shrink([false, false])
@@ -3391,6 +3714,7 @@ impl FastCsvApp {
             let operator = tab.filter_state.selected_operator;
             let value = tab.filter_state.filter_input.clone();
             tab.filter_state.apply_filter(col_idx, operator, value);
+            analytics::track_filter_applied(tab.filter_state.filters.len());
             self.mark_filter_changed();
         } else if should_clear {
             tab.filter_state.clear_filter(col_idx);
@@ -3518,7 +3842,7 @@ impl FastCsvApp {
             // Shortcut key badge on the right
             egui::Frame::NONE
                 .fill(Color32::from_rgb(35, 35, 40))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(55, 55, 60)))
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
                 .corner_radius(egui::CornerRadius::same(4))
                 .inner_margin(egui::Margin::symmetric(10, 5))
                 .show(ui, |ui| {
@@ -4000,13 +4324,18 @@ impl eframe::App for FastCsvApp {
         #[cfg(target_arch = "wasm32")]
         {
             self.ensure_tabs();
-            while let Ok((name, bytes)) = self.file_loader_rx.try_recv() {
-                self.load_file_web(name, bytes, ctx.clone());
+            while let Ok((tab_id, generation, name, bytes)) = self.file_loader_rx.try_recv() {
+                self.load_file_web(tab_id, generation, name, bytes, ctx.clone());
             }
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        self.consume_pending_native_open_paths(ctx);
+        {
+            self.consume_pending_native_open_paths(ctx);
+            self.sync_loaded_headers();
+            // Reload any open files that changed on disk
+            self.reload_files_externally_changed(ctx);
+        }
 
         // Check for updates on startup (only once)
         if !self.update_state.check_initiated {
@@ -4058,6 +4387,9 @@ impl eframe::App for FastCsvApp {
 
         self.ensure_tabs();
         let tab_idx = self.active_tab_index;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        self.finalize_active_external_reload(ctx);
 
         // Check for async filtering results
         {
@@ -4571,6 +4903,15 @@ impl eframe::App for FastCsvApp {
                         });
                     });
                 }
+                LoadState::ReloadPending => {
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.spinner();
+                            ui.add_space(10.0);
+                            ui.label("File changed - waiting for save to finish...");
+                        });
+                    });
+                }
                 LoadState::Indexing => {
                     // Get row count without holding tab borrow
                     let rows = {
@@ -4658,7 +4999,12 @@ impl eframe::App for FastCsvApp {
                 // Add to recent files before loading
                 self.recent_files.add_file(name.clone(), name.clone());
                 self.save_recent_files();
-                self.load_file_web(name, bytes, ctx.clone());
+                let (tab_id, generation) = {
+                    let tab = &mut self.tabs[self.active_tab_index];
+                    tab.load_generation = tab.load_generation.wrapping_add(1);
+                    (tab.id, tab.load_generation)
+                };
+                self.load_file_web(tab_id, generation, name, bytes, ctx.clone());
             }
         }
 
@@ -4781,6 +5127,7 @@ fn main() -> eframe::Result<()> {
 
             // Load recent files from storage
             let mut app = FastCsvApp::default();
+            app.init_file_watcher(cc.egui_ctx.clone());
             app.load_recent_files();
             app.recent_files_loaded = true;
             app.consume_pending_native_open_paths(&cc.egui_ctx);
@@ -5038,7 +5385,10 @@ mod plist_tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod native_file_open_tests {
-    use super::{collect_startup_file_paths, FastCsvApp};
+    use super::{
+        collect_startup_file_paths, FastCsvApp, FilterCondition, FilterOperator, LoadState,
+        SortDirection,
+    };
     use eframe::egui;
     use std::path::{Path, PathBuf};
 
@@ -5096,6 +5446,306 @@ mod native_file_open_tests {
 
         let _ = std::fs::remove_file(first);
         let _ = std::fs::remove_file(second);
+    }
+
+    #[test]
+    fn external_file_change_triggers_tab_reload() {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let file = temp_csv_path("reload.csv");
+        std::fs::write(&file, "name\nalice\n").expect("should create csv");
+
+        let mut app = FastCsvApp::default();
+        let ctx = egui::Context::default();
+        app.init_file_watcher(ctx.clone());
+        app.open_native_path(file.clone(), &ctx);
+
+        // Wait for the initial load to finish indexing (1 data row).
+        let initial_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let done = {
+                let state = app.tabs[0].state.read();
+                state.indexing_complete.load(Ordering::Relaxed)
+            };
+            if done {
+                break;
+            }
+            assert!(
+                Instant::now() < initial_deadline,
+                "initial load did not finish indexing in time"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        app.tabs[0].file_tracked = true;
+        app.tabs[0].json_viewer.open = true;
+        app.tabs[0].json_viewer.raw_content = "stale".to_string();
+        app.tabs[0].row_detail.open = true;
+        app.tabs[0].row_detail.fields = vec!["stale".to_string()];
+        app.tabs[0].go_to_row.highlight_row = Some(0);
+        app.tabs[0].column_state.hidden_columns.insert(0);
+        app.tabs[0].filter_state.filters.insert(
+            0,
+            FilterCondition {
+                operator: FilterOperator::Contains,
+                value: "o".to_string(),
+            },
+        );
+        app.tabs[0].sort_state.column = Some(0);
+        app.tabs[0].sort_state.direction = SortDirection::Descending;
+
+        // A first event suspends the old mapping immediately but does not load
+        // until the full trailing debounce interval has elapsed.
+        std::fs::write(&file, "name\nbob\ncarol\ndave\n").expect("should overwrite csv");
+        let suspend_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.reload_files_externally_changed(&ctx);
+            if matches!(
+                app.tabs[0].state.read().load_state,
+                LoadState::ReloadPending
+            ) {
+                break;
+            }
+            assert!(
+                Instant::now() < suspend_deadline,
+                "external change was not suspended in time"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(app.tabs[0].state.read().csv.is_none());
+        assert!(
+            app.tabs[0].file_tracked,
+            "reload must not re-track file_open"
+        );
+        assert!(!app.tabs[0].json_viewer.open);
+        assert!(!app.tabs[0].row_detail.open);
+        assert!(app.tabs[0].go_to_row.highlight_row.is_none());
+        assert!(app.tabs[0].column_state.hidden_columns.contains(&0));
+        assert!(app.tabs[0].filter_state.filters.contains_key(&0));
+
+        std::thread::sleep(Duration::from_millis(200));
+        app.reload_files_externally_changed(&ctx);
+        assert!(matches!(
+            app.tabs[0].state.read().load_state,
+            LoadState::ReloadPending
+        ));
+
+        let reload_deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            app.reload_files_externally_changed(&ctx);
+            app.finalize_active_external_reload(&ctx);
+            let rows = {
+                let state = app.tabs[0].state.read();
+                state
+                    .csv
+                    .as_ref()
+                    .map(|c| c.indexed_row_count())
+                    .unwrap_or(0)
+            };
+            if rows >= 3 && app.tabs[0].external_reload.is_none() {
+                break;
+            }
+            if Instant::now() >= reload_deadline {
+                let state = app.tabs[0].state.read();
+                let state_name = match state.load_state {
+                    LoadState::Empty => "empty",
+                    LoadState::ReloadPending => "reload-pending",
+                    LoadState::Indexing => "indexing",
+                    LoadState::Ready => "ready",
+                    LoadState::Error => "error",
+                };
+                panic!(
+                    "external reload timed out; rows={rows}, state={state_name}, error={:?}, complete={}, pending={}",
+                    state.error_message,
+                    state.indexing_complete.load(Ordering::Relaxed),
+                    app.tabs[0].external_reload.is_some()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(app.tabs[0].file_tracked);
+        assert!(app.tabs[0].column_state.hidden_columns.contains(&0));
+        assert!(app.tabs[0].filter_state.filters.contains_key(&0));
+        assert_eq!(app.tabs[0].sort_state.column, Some(0));
+        assert!(app.tabs[0].sort_state.direction == SortDirection::Descending);
+
+        let sort_deadline = Instant::now() + Duration::from_secs(5);
+        while app.tabs[0].sort_state.is_sorting.load(Ordering::Relaxed) {
+            assert!(Instant::now() < sort_deadline, "restored sort timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(*app.tabs[0].sort_state.sorted_indices.read(), vec![2, 1, 0]);
+
+        app.start_async_filtering(&ctx);
+        let filtered = app.tabs[0]
+            .filter_receiver
+            .as_ref()
+            .expect("restored filter should run")
+            .recv_timeout(Duration::from_secs(5))
+            .expect("restored filter should finish");
+        assert_eq!(filtered.0, vec![1, 0]);
+
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn suspending_reload_does_not_wait_for_old_state_writers() {
+        use std::sync::atomic::Ordering;
+        use std::sync::{mpsc, Arc};
+        use std::time::{Duration, Instant};
+
+        let file = temp_csv_path("generation.csv");
+        std::fs::write(&file, "id\n1\n2\n").expect("should create csv");
+        let mut app = FastCsvApp::default();
+        let ctx = egui::Context::default();
+        app.open_native_path(file.clone(), &ctx);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app.tabs[0]
+            .state
+            .read()
+            .indexing_complete
+            .load(Ordering::Relaxed)
+        {
+            assert!(Instant::now() < deadline, "initial load timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let old_state = Arc::clone(&app.tabs[0].state);
+        let held_state = Arc::clone(&old_state);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _guard = held_state.write();
+            ready_tx.send(()).expect("reader should signal");
+            std::thread::sleep(Duration::from_millis(800));
+        });
+        ready_rx.recv().expect("reader should start");
+
+        let started = Instant::now();
+        app.suspend_tabs_for_path(&file);
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "suspension blocked on an old writer"
+        );
+        assert!(!Arc::ptr_eq(&old_state, &app.tabs[0].state));
+        assert!(matches!(
+            app.tabs[0].state.read().load_state,
+            LoadState::ReloadPending
+        ));
+
+        reader.join().expect("writer should exit");
+        old_state.read().rows_indexed.store(999, Ordering::Relaxed);
+        old_state
+            .read()
+            .indexing_complete
+            .store(true, Ordering::Relaxed);
+        assert_eq!(
+            app.tabs[0]
+                .state
+                .read()
+                .rows_indexed
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert!(!app.tabs[0]
+            .state
+            .read()
+            .indexing_complete
+            .load(Ordering::Relaxed));
+
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn external_reload_resets_indexed_preferences_when_headers_change() {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let file = temp_csv_path("schema-change.csv");
+        std::fs::write(&file, "first,second\n1,2\n").expect("should create csv");
+        let mut app = FastCsvApp::default();
+        let ctx = egui::Context::default();
+        app.open_native_path(file.clone(), &ctx);
+
+        let initial_deadline = Instant::now() + Duration::from_secs(5);
+        while !app.tabs[0]
+            .state
+            .read()
+            .indexing_complete
+            .load(Ordering::Relaxed)
+        {
+            assert!(Instant::now() < initial_deadline, "initial load timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        app.tabs[0].column_state.init_column_order(2);
+        app.tabs[0].column_state.hidden_columns.insert(0);
+        app.tabs[0].column_widths = vec![80.0, 120.0];
+        app.tabs[0].filter_state.filters.insert(
+            0,
+            FilterCondition {
+                operator: FilterOperator::Equals,
+                value: "1".to_string(),
+            },
+        );
+        app.tabs[0].sort_state.column = Some(0);
+        app.tabs[0].sort_state.direction = SortDirection::Ascending;
+
+        app.suspend_tabs_for_path(&file);
+        std::fs::write(&file, "renamed,second\n3,4\n").expect("should replace csv");
+        app.start_tab_load(0, file.clone(), ctx.clone());
+
+        let reload_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.finalize_active_external_reload(&ctx);
+            if app.tabs[0].external_reload.is_none() {
+                break;
+            }
+            assert!(Instant::now() < reload_deadline, "reload timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(app.tabs[0].column_state.hidden_columns.is_empty());
+        assert!(app.tabs[0].filter_state.filters.is_empty());
+        assert!(app.tabs[0].column_widths.is_empty());
+        assert!(app.tabs[0].sort_state.column.is_none());
+        assert!(app.tabs[0].sort_state.direction == SortDirection::None);
+
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn clearing_filters_cancels_and_drops_stale_filter_results() {
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let mut app = FastCsvApp::default();
+        let ctx = egui::Context::default();
+        let old_cancel = Arc::new(AtomicBool::new(false));
+        app.tabs[0].filter_cancel_flag = Arc::clone(&old_cancel);
+        app.tabs[0].is_filtering = Arc::new(AtomicBool::new(true));
+
+        let (sender, receiver) = mpsc::channel();
+        app.tabs[0].filter_receiver = Some(receiver);
+        sender
+            .send((
+                vec![1, 2],
+                HashMap::new(),
+                None,
+                SortDirection::None,
+                Duration::ZERO,
+            ))
+            .expect("stale result should queue");
+
+        app.start_async_filtering(&ctx);
+
+        assert!(old_cancel.load(Ordering::Acquire));
+        assert!(app.tabs[0].filter_receiver.is_none());
+        assert!(app.tabs[0].filtered_indices.is_none());
+        assert!(!app.tabs[0].is_filtering.load(Ordering::Relaxed));
     }
 }
 

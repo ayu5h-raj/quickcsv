@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 #[derive(Clone, Copy, PartialEq)]
 pub enum LoadState {
     Empty,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    ReloadPending,
     Indexing,
     Ready,
     Error,
@@ -22,8 +24,6 @@ pub struct SharedState {
     pub error_message: Option<String>,
     /// Number of rows indexed so far (for progress display)
     pub rows_indexed: AtomicUsize,
-    /// Flag to cancel ongoing indexing
-    pub cancel_indexing: AtomicBool,
     /// Flag to indicate indexing is complete
     pub indexing_complete: AtomicBool,
 }
@@ -35,7 +35,6 @@ impl Default for SharedState {
             load_state: LoadState::Empty,
             error_message: None,
             rows_indexed: AtomicUsize::new(0),
-            cancel_indexing: AtomicBool::new(false),
             indexing_complete: AtomicBool::new(false),
         }
     }
