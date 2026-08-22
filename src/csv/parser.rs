@@ -47,7 +47,13 @@ struct SnapshotCleanup {
 fn try_create_snapshot_workspace(parent: &Path) -> Option<SnapshotCleanup> {
     for _ in 0..16 {
         let directory = parent.join(snapshot_directory_name());
-        match std::fs::create_dir(&directory) {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&directory) {
             Ok(()) => {
                 return Some(SnapshotCleanup {
                     path: directory.join("data"),
@@ -89,7 +95,38 @@ fn try_clone_snapshot(source: &Path, destination: &Path) -> bool {
     unsafe { libc::clonefile(source.as_ptr(), destination.as_ptr(), 0) == 0 }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
+fn try_clone_snapshot(source: &Path, destination: &Path) -> bool {
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    const FICLONE: libc::c_ulong = 0x4004_9409;
+    let Ok(source) = File::open(source) else {
+        return false;
+    };
+    let Ok(destination_file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+    else {
+        return false;
+    };
+    let cloned =
+        unsafe { libc::ioctl(destination_file.as_raw_fd(), FICLONE, source.as_raw_fd()) == 0 };
+    if !cloned {
+        drop(destination_file);
+        let _ = std::fs::remove_file(destination);
+    }
+    cloned
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(any(target_os = "macos", target_os = "linux"))
+))]
 fn try_clone_snapshot(_source: &Path, _destination: &Path) -> bool {
     false
 }

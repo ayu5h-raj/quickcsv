@@ -72,6 +72,8 @@ rfd = "0.16"
 memmap2 = "0.9"
 # Filesystem notifications for auto-reload on external file changes
 notify = "8.2"
+# Native snapshot/reflink system calls
+libc = "0.2"
 # Config directory access
 dirs = "5.0"
 
@@ -85,7 +87,6 @@ ureq = "3.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder"] }
 objc2-foundation = { version = "0.2", features = ["NSAppleEventDescriptor", "NSAppleEventManager", "NSString", "NSURL", "NSObject"] }

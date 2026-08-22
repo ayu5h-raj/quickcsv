@@ -572,6 +572,7 @@ impl FastCsvApp {
         tab.scroll_y = 0.0;
         tab.scroll_x = 0.0;
         tab.column_widths.clear();
+        tab.loaded_headers.clear();
         tab.row_cache.clear();
         tab.last_visible_range = (0, 0);
         tab.sort_state = SortState::default();
@@ -617,6 +618,12 @@ impl FastCsvApp {
             // Update tab file info
             tab.file_path = name.clone();
             tab.file_name = name.clone();
+            tab.loaded_headers = state
+                .read()
+                .csv
+                .as_ref()
+                .map(|csv| csv.headers.clone())
+                .unwrap_or_default();
             // Add to recent files
             self.recent_files.add_file(name.clone(), name);
             self.save_recent_files();
@@ -677,7 +684,7 @@ impl FastCsvApp {
     fn load_file(&mut self, path: PathBuf, ctx: egui::Context) {
         self.ensure_tabs();
         let idx = self.active_tab_index;
-        self.register_file_watcher(&path);
+        self.register_file_watcher(idx, &path);
         if let Some(watcher) = self.file_watcher.as_mut() {
             watcher.begin_snapshot(&path, Instant::now());
         }
@@ -703,6 +710,7 @@ impl FastCsvApp {
             tab.scroll_y = 0.0;
             tab.scroll_x = 0.0;
             tab.column_widths.clear();
+            tab.loaded_headers.clear();
             tab.row_cache.clear();
             tab.last_visible_range = (0, 0);
             tab.sort_state = SortState::default();
@@ -772,17 +780,19 @@ impl FastCsvApp {
 
     /// Register a loaded file with the watcher so external changes trigger a reload
     #[cfg(not(target_arch = "wasm32"))]
-    fn register_file_watcher(&mut self, path: &Path) {
+    fn register_file_watcher(&mut self, tab_idx: usize, path: &Path) {
         let Some(watcher) = self.file_watcher.as_mut() else {
             return;
         };
-        if watcher.register(path) {
-            self.file_watcher_error = None;
-        } else {
-            self.file_watcher_error = Some(format!(
-                "Auto-reload unavailable for {}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ));
+        match watcher.register(path) {
+            Some(registration) => {
+                self.tabs[tab_idx].watch_registration = Some(registration);
+                self.tabs[tab_idx].watch_registration_failed = false;
+            }
+            None => {
+                self.tabs[tab_idx].watch_registration = None;
+                self.tabs[tab_idx].watch_registration_failed = true;
+            }
         }
     }
 
@@ -803,9 +813,26 @@ impl FastCsvApp {
 
     /// Stop watching a file (e.g. when its tab is closed)
     #[cfg(not(target_arch = "wasm32"))]
-    fn unregister_file_watcher(&mut self, path: &str) {
-        if let Some(watcher) = self.file_watcher.as_mut() {
-            watcher.unregister(Path::new(path));
+    fn unregister_tab_file_watcher(&mut self, tab_idx: usize) {
+        let path = PathBuf::from(&self.tabs[tab_idx].file_path);
+        let registration = self.tabs[tab_idx].watch_registration.take();
+        self.tabs[tab_idx].watch_registration_failed = false;
+        if let (Some(watcher), Some(registration)) = (self.file_watcher.as_mut(), registration) {
+            watcher.unregister(&registration, &path);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sync_loaded_headers(&mut self) {
+        for tab in &mut self.tabs {
+            let Some(headers) = tab
+                .state
+                .try_read()
+                .and_then(|state| state.csv.as_ref().map(|csv| csv.headers.clone()))
+            else {
+                continue;
+            };
+            tab.loaded_headers = headers;
         }
     }
 
@@ -821,7 +848,10 @@ impl FastCsvApp {
                 let headers = tab
                     .state
                     .try_read()
-                    .and_then(|state| state.csv.as_ref().map(|csv| csv.headers.clone()));
+                    .and_then(|state| state.csv.as_ref().map(|csv| csv.headers.clone()))
+                    .or_else(|| {
+                        (!tab.loaded_headers.is_empty()).then(|| tab.loaded_headers.clone())
+                    });
                 tab.external_reload = Some(ExternalReloadState {
                     headers,
                     sort_column: tab.sort_state.column,
@@ -936,6 +966,7 @@ impl FastCsvApp {
                 .map(|csv| csv.headers.clone())
                 .unwrap_or_default()
         };
+        self.tabs[idx].loaded_headers = new_headers.clone();
         let reload = self.tabs[idx]
             .external_reload
             .take()
@@ -1800,12 +1831,7 @@ impl FastCsvApp {
 
         // Stop watching the file being closed
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let path = self.tabs[idx].file_path.clone();
-            if !path.is_empty() {
-                self.unregister_file_watcher(&path);
-            }
-        }
+        self.unregister_tab_file_watcher(idx);
 
         // Adjust active tab index
         if idx > 0 {
@@ -1907,12 +1933,7 @@ impl FastCsvApp {
             self.tabs[idx].cancel_workers();
             // Stop watching the file being closed
             #[cfg(not(target_arch = "wasm32"))]
-            {
-                let path = self.tabs[idx].file_path.clone();
-                if !path.is_empty() {
-                    self.unregister_file_watcher(&path);
-                }
-            }
+            self.unregister_tab_file_watcher(idx);
             if idx < self.active_tab_index {
                 self.active_tab_index -= 1;
             } else if idx == self.active_tab_index {
@@ -2927,6 +2948,19 @@ impl FastCsvApp {
             if let Some(error) = &self.file_watcher_error {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, error);
+            } else {
+                let failures = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.watch_registration_failed)
+                    .count();
+                if failures > 0 {
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("Auto-reload unavailable for {failures} file(s)"),
+                    );
+                }
             }
 
             // Show update check status message on the right
@@ -4298,6 +4332,7 @@ impl eframe::App for FastCsvApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.consume_pending_native_open_paths(ctx);
+            self.sync_loaded_headers();
             // Reload any open files that changed on disk
             self.reload_files_externally_changed(ctx);
         }

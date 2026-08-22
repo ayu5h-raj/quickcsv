@@ -45,6 +45,8 @@ pub struct TabState {
     pub file_path: String,
     /// Display name (filename only)
     pub file_name: String,
+    /// Last published headers, cached outside SharedState for nonblocking reload capture
+    pub loaded_headers: Vec<String>,
     /// Vertical scroll offset
     pub scroll_y: f32,
     /// Horizontal scroll offset
@@ -105,6 +107,12 @@ pub struct TabState {
     /// Whether file_open event has been tracked for this tab
     #[cfg(not(target_arch = "wasm32"))]
     pub file_tracked: bool,
+    /// Stable canonical watcher identity for precise unregistering
+    #[cfg(not(target_arch = "wasm32"))]
+    pub watch_registration: Option<PathBuf>,
+    /// Whether this tab failed to register for auto-reload
+    #[cfg(not(target_arch = "wasm32"))]
+    pub watch_registration_failed: bool,
     /// User intent to restore after a stable external reload finishes
     #[cfg(not(target_arch = "wasm32"))]
     pub external_reload: Option<ExternalReloadState>,
@@ -122,6 +130,7 @@ impl TabState {
             index_cancel_flag: Arc::new(AtomicBool::new(false)),
             file_path: String::new(),
             file_name: String::new(),
+            loaded_headers: Vec::new(),
             scroll_y: 0.0,
             scroll_x: 0.0,
             column_widths: Vec::new(),
@@ -148,6 +157,10 @@ impl TabState {
             filter_duration: None,
             #[cfg(not(target_arch = "wasm32"))]
             file_tracked: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            watch_registration: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            watch_registration_failed: false,
             #[cfg(not(target_arch = "wasm32"))]
             external_reload: None,
         }
@@ -172,6 +185,7 @@ impl TabState {
             index_cancel_flag: Arc::new(AtomicBool::new(false)),
             file_path,
             file_name,
+            loaded_headers: Vec::new(),
             scroll_y: 0.0,
             scroll_x: 0.0,
             column_widths: Vec::new(),
@@ -199,6 +213,10 @@ impl TabState {
             #[cfg(not(target_arch = "wasm32"))]
             file_tracked: false,
             #[cfg(not(target_arch = "wasm32"))]
+            watch_registration: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            watch_registration_failed: false,
+            #[cfg(not(target_arch = "wasm32"))]
             external_reload: None,
         }
     }
@@ -216,6 +234,7 @@ impl TabState {
             index_cancel_flag: Arc::new(AtomicBool::new(false)),
             file_path: name.clone(),
             file_name: name,
+            loaded_headers: Vec::new(),
             scroll_y: 0.0,
             scroll_x: 0.0,
             column_widths: Vec::new(),

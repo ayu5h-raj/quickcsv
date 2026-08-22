@@ -170,9 +170,9 @@ impl FileWatcher {
     }
 
     /// Register one tab's interest in a file.
-    pub fn register(&mut self, path: &Path) -> bool {
+    pub fn register(&mut self, path: &Path) -> Option<PathBuf> {
         let Ok(canonical) = path.canonicalize() else {
-            return false;
+            return None;
         };
         let alias = path.to_path_buf();
 
@@ -181,20 +181,18 @@ impl FileWatcher {
             if let Some(file) = watched.get_mut(&canonical) {
                 file.refs += 1;
                 *file.aliases.entry(alias).or_insert(0) += 1;
-                return true;
+                return Some(canonical);
             }
         }
 
-        let Some(parent) = canonical.parent().map(Path::to_path_buf) else {
-            return false;
-        };
+        let parent = canonical.parent().map(Path::to_path_buf)?;
         if !self.watched_dirs.contains_key(&parent)
             && self
                 .watcher
                 .watch(&parent, RecursiveMode::NonRecursive)
                 .is_err()
         {
-            return false;
+            return None;
         }
 
         *self.watched_dirs.entry(parent).or_insert(0) += 1;
@@ -202,43 +200,32 @@ impl FileWatcher {
         aliases.insert(alias, 1);
         let fingerprint = file_fingerprint(&canonical);
         self.watched.write().insert(
-            canonical,
+            canonical.clone(),
             WatchedFile {
                 aliases,
                 refs: 1,
                 fingerprint,
             },
         );
-        true
+        Some(canonical)
     }
 
     /// Remove one tab's interest and unwatch the directory after the last file closes.
-    pub fn unregister(&mut self, path: &Path) {
-        let canonical = path.canonicalize().ok().or_else(|| {
-            self.watched
-                .read()
-                .iter()
-                .find(|(_, file)| file.aliases.contains_key(path))
-                .map(|(canonical, _)| canonical.clone())
-        });
-        let Some(canonical) = canonical else {
-            return;
-        };
-
+    pub fn unregister(&mut self, canonical: &Path, alias: &Path) {
         let remove_file = {
             let mut watched = self.watched.write();
-            let Some(file) = watched.get_mut(&canonical) else {
+            let Some(file) = watched.get_mut(canonical) else {
                 return;
             };
             file.refs = file.refs.saturating_sub(1);
-            if let Some(alias_refs) = file.aliases.get_mut(path) {
+            if let Some(alias_refs) = file.aliases.get_mut(alias) {
                 *alias_refs = alias_refs.saturating_sub(1);
                 if *alias_refs == 0 {
-                    file.aliases.remove(path);
+                    file.aliases.remove(alias);
                 }
             }
             if file.refs == 0 {
-                watched.remove(&canonical);
+                watched.remove(canonical);
                 true
             } else {
                 false
@@ -248,9 +235,9 @@ impl FileWatcher {
             return;
         }
 
-        self.pending.remove(&canonical);
-        self.pending_paths.write().remove(&canonical);
-        self.snapshot_windows.write().remove(&canonical);
+        self.pending.remove(canonical);
+        self.pending_paths.write().remove(canonical);
+        self.snapshot_windows.write().remove(canonical);
         let Some(parent) = canonical.parent().map(Path::to_path_buf) else {
             return;
         };
@@ -388,11 +375,16 @@ mod tests {
         std::fs::write(&path, "id\n1\n").expect("should create temp csv");
         let mut watcher = FileWatcher::new(egui::Context::default()).expect("watcher should start");
 
-        assert!(watcher.register(&path));
-        assert!(watcher.register(&path));
-        watcher.unregister(&path);
+        let first = watcher
+            .register(&path)
+            .expect("first watch should register");
+        let second = watcher
+            .register(&path)
+            .expect("second watch should register");
+        assert_eq!(first, second);
+        watcher.unregister(&first, &path);
         assert_eq!(watcher.watched.read().len(), 1);
-        watcher.unregister(&path);
+        watcher.unregister(&second, &path);
         assert!(watcher.watched.read().is_empty());
 
         let _ = std::fs::remove_file(path);
@@ -404,7 +396,7 @@ mod tests {
         std::fs::write(&path, "id\n1\n").expect("should create temp csv");
         let canonical = path.canonicalize().expect("temp csv should canonicalize");
         let mut watcher = FileWatcher::new(egui::Context::default()).expect("watcher should start");
-        assert!(watcher.register(&path));
+        assert!(watcher.register(&path).is_some());
 
         let start = Instant::now();
         watcher
@@ -429,5 +421,37 @@ mod tests {
         assert_eq!(settled.reload, vec![path.clone()]);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_retarget_unregisters_the_original_registration() {
+        use std::os::unix::fs::symlink;
+
+        let first_target = temp_csv("first-target.csv");
+        let second_target = temp_csv("second-target.csv");
+        let alias = temp_csv("alias.csv");
+        std::fs::write(&first_target, "id\n1\n").expect("should create first target");
+        std::fs::write(&second_target, "id\n2\n").expect("should create second target");
+        symlink(&first_target, &alias).expect("should create symlink");
+
+        let mut watcher = FileWatcher::new(egui::Context::default()).expect("watcher should start");
+        let first_registration = watcher
+            .register(&alias)
+            .expect("first target should register");
+        std::fs::remove_file(&alias).expect("should remove old symlink");
+        symlink(&second_target, &alias).expect("should retarget symlink");
+        let second_registration = watcher
+            .register(&alias)
+            .expect("second target should register");
+
+        watcher.unregister(&first_registration, &alias);
+        assert!(!watcher.watched.read().contains_key(&first_registration));
+        assert!(watcher.watched.read().contains_key(&second_registration));
+
+        watcher.unregister(&second_registration, &alias);
+        let _ = std::fs::remove_file(alias);
+        let _ = std::fs::remove_file(first_target);
+        let _ = std::fs::remove_file(second_target);
     }
 }
