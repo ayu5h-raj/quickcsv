@@ -16,4 +16,6 @@ pub use filter::{FilterCondition, FilterOperator, FilterState};
 pub use search::{SearchState, SearchStatus, MAX_NAV_ROWS};
 pub use shared::{LoadState, SharedState};
 pub use sort::{SortDirection, SortState};
+#[cfg(not(target_arch = "wasm32"))]
+pub use tab::ExternalReloadState;
 pub use tab::TabState;

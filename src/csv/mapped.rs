@@ -10,7 +10,7 @@ use std::sync::Arc;
 pub struct MappedCsv {
     /// Memory-mapped file data (Native)
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) mmap: Mmap,
+    pub(crate) mmap: Arc<Mmap>,
     /// In-memory file data (WASM)
     #[cfg(target_arch = "wasm32")]
     pub(crate) data: Vec<u8>,
@@ -62,7 +62,7 @@ impl MappedCsv {
             self.data().len()
         };
 
-        Some(&self.data()[start..end])
+        self.data().get(start..end)
     }
 
     /// Parse a single row into fields

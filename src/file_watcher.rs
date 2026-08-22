@@ -1,155 +1,335 @@
 //! Filesystem watcher for detecting external changes to open CSV files.
-//!
-//! Native only - web builds load files into browser memory and cannot watch
-//! the filesystem, so auto-reload is a desktop-only feature.
-
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use eframe::egui;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant, SystemTime};
 
-/// Minimum time between two auto-reloads of the same file (debounce).
-///
-/// Editors frequently emit several events for a single save (truncate, write,
-/// metadata, rename), so we collapse them into one reload.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
+const SNAPSHOT_EVENT_WINDOW: Duration = Duration::from_secs(2);
 
-/// Whether a filesystem event indicates the file's contents may have changed.
-///
-/// Pure function so it can be unit-tested without a live watcher.
 fn is_content_change(event: &Event) -> bool {
     use notify::event::ModifyKind;
     match event.kind {
         EventKind::Create(_) | EventKind::Remove(_) => true,
         EventKind::Modify(ModifyKind::Data(_)) | EventKind::Modify(ModifyKind::Name(_)) => true,
         EventKind::Modify(ModifyKind::Any) => true,
-        // Metadata-only changes (mtime/chmod) are not content changes.
         EventKind::Modify(ModifyKind::Metadata(_)) => false,
         _ => false,
     }
 }
 
-/// Tracks open files and reports which ones changed on disk.
-///
-/// Watches the parent directory of each open file (rather than the file
-/// itself) so atomic saves - where an editor replaces the file via rename -
-/// are still detected. Events are filtered to the files we actually care about
-/// and debounced to avoid duplicate reloads.
+#[derive(Default)]
+struct WatchedFile {
+    aliases: HashMap<PathBuf, usize>,
+    refs: usize,
+    fingerprint: Option<FileFingerprint>,
+}
+
+#[derive(Clone, PartialEq)]
+struct FileFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+    inode: u64,
+    changed_at: (i64, i64),
+}
+
+fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let (inode, changed_at) = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.ino(), (metadata.ctime(), metadata.ctime_nsec()))
+    };
+    #[cfg(not(unix))]
+    let inode = 0;
+    #[cfg(not(unix))]
+    let changed_at = (0, 0);
+    Some(FileFingerprint {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        inode,
+        changed_at,
+    })
+}
+
+struct PendingChange {
+    last_event_at: Instant,
+}
+
+/// Actions produced by one watcher poll.
+pub struct FileChangeBatch {
+    /// Paths whose currently mapped data must be hidden immediately.
+    pub suspend: Vec<PathBuf>,
+    /// Paths that have been quiet long enough to load safely.
+    pub reload: Vec<PathBuf>,
+    /// Delay until the next pending path reaches the trailing debounce edge.
+    pub next_check: Option<Duration>,
+}
+
+/// Tracks open files, filters parent-directory noise, and trailing-debounces saves.
 pub struct FileWatcher {
-    /// The notify watcher driving events (kept alive for the struct's lifetime).
     watcher: RecommendedWatcher,
-    /// Receives raw filesystem events from the notify thread.
-    rx: mpsc::Receiver<notify::Result<Event>>,
-    /// Canonical file path -> the original path it was registered under.
-    watched: HashMap<PathBuf, PathBuf>,
-    /// Timestamp of the last reported change per file (for debouncing).
-    last_reported: HashMap<PathBuf, Instant>,
+    rx: mpsc::Receiver<PathBuf>,
+    #[cfg(test)]
+    tx: mpsc::Sender<PathBuf>,
+    watched: Arc<RwLock<HashMap<PathBuf, WatchedFile>>>,
+    pending_paths: Arc<RwLock<HashSet<PathBuf>>>,
+    snapshot_windows: Arc<RwLock<HashMap<PathBuf, Instant>>>,
+    watched_dirs: HashMap<PathBuf, usize>,
+    pending: HashMap<PathBuf, PendingChange>,
 }
 
 impl FileWatcher {
-    /// Create a watcher. Events request a repaint on `ctx` so the UI thread
-    /// wakes up and can drain the queued changes.
     pub fn new(ctx: egui::Context) -> Result<Self, notify::Error> {
         let (tx, rx) = mpsc::channel();
+        let watched = Arc::new(RwLock::new(HashMap::<PathBuf, WatchedFile>::new()));
+        let watched_for_callback = Arc::clone(&watched);
+        let pending_paths = Arc::new(RwLock::new(HashSet::new()));
+        let pending_for_callback = Arc::clone(&pending_paths);
+        let snapshot_windows = Arc::new(RwLock::new(HashMap::<PathBuf, Instant>::new()));
+        let snapshots_for_callback = Arc::clone(&snapshot_windows);
+        let callback_tx = tx.clone();
+
         let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            let Ok(event) = res else {
+                return;
+            };
+            if !is_content_change(&event) {
+                return;
+            }
+
+            let candidates: HashMap<PathBuf, Option<FileFingerprint>> = {
+                let registry = watched_for_callback.read();
+                let mut candidates = HashMap::new();
+                for event_path in &event.paths {
+                    let canonical = event_path.canonicalize().ok();
+                    for (watched_path, file) in registry.iter() {
+                        let is_match = canonical.as_ref() == Some(watched_path)
+                            || event_path == watched_path
+                            || file.aliases.contains_key(event_path);
+                        if is_match {
+                            candidates.insert(watched_path.clone(), file.fingerprint.clone());
+                        }
+                    }
+                }
+                candidates
+            };
+
+            if candidates.is_empty() {
+                return;
+            }
+            let pending = pending_for_callback.read();
+            let snapshot_windows = snapshots_for_callback.read();
+            let event_time = Instant::now();
+            let changed: Vec<(PathBuf, Option<FileFingerprint>)> = candidates
+                .into_iter()
+                .filter_map(|(path, previous)| {
+                    let current = file_fingerprint(&path);
+                    let suppress_unchanged = snapshot_windows
+                        .get(&path)
+                        .is_some_and(|deadline| event_time < *deadline);
+                    (pending.contains(&path) || previous != current || !suppress_unchanged)
+                        .then_some((path, current))
+                })
+                .collect();
+            drop(snapshot_windows);
+            drop(pending);
+            if changed.is_empty() {
+                return;
+            }
+
+            {
+                let mut registry = watched_for_callback.write();
+                for (path, fingerprint) in &changed {
+                    if let Some(file) = registry.get_mut(path) {
+                        file.fingerprint = fingerprint.clone();
+                    }
+                }
+            }
+            for (path, _) in changed {
+                let _ = callback_tx.send(path);
+            }
             ctx.request_repaint();
-            let _ = tx.send(res);
         })?;
+
         Ok(Self {
             watcher,
             rx,
-            watched: HashMap::new(),
-            last_reported: HashMap::new(),
+            #[cfg(test)]
+            tx,
+            watched,
+            pending_paths,
+            snapshot_windows,
+            watched_dirs: HashMap::new(),
+            pending: HashMap::new(),
         })
     }
 
-    /// Start watching `path` (by registering its parent directory).
-    pub fn register(&mut self, path: &Path) {
+    /// Register one tab's interest in a file.
+    pub fn register(&mut self, path: &Path) -> bool {
         let Ok(canonical) = path.canonicalize() else {
-            return;
+            return false;
         };
-        if self.watched.contains_key(&canonical) {
-            return;
-        }
-        let original = path.to_path_buf();
-        self.watched.insert(canonical.clone(), original);
+        let alias = path.to_path_buf();
 
-        let Some(parent) = canonical.parent() else {
-            return;
+        {
+            let mut watched = self.watched.write();
+            if let Some(file) = watched.get_mut(&canonical) {
+                file.refs += 1;
+                *file.aliases.entry(alias).or_insert(0) += 1;
+                return true;
+            }
+        }
+
+        let Some(parent) = canonical.parent().map(Path::to_path_buf) else {
+            return false;
         };
-        // Best-effort: ignore errors (e.g. directory disappearing).
-        let _ = self.watcher.watch(parent, RecursiveMode::NonRecursive);
+        if !self.watched_dirs.contains_key(&parent)
+            && self
+                .watcher
+                .watch(&parent, RecursiveMode::NonRecursive)
+                .is_err()
+        {
+            return false;
+        }
+
+        *self.watched_dirs.entry(parent).or_insert(0) += 1;
+        let mut aliases = HashMap::new();
+        aliases.insert(alias, 1);
+        let fingerprint = file_fingerprint(&canonical);
+        self.watched.write().insert(
+            canonical,
+            WatchedFile {
+                aliases,
+                refs: 1,
+                fingerprint,
+            },
+        );
+        true
     }
 
-    /// Stop watching the file at `path`, unwatching its parent directory when
-    /// no other registered file lives there anymore.
+    /// Remove one tab's interest and unwatch the directory after the last file closes.
     pub fn unregister(&mut self, path: &Path) {
-        let canonical = match path.canonicalize() {
-            Ok(c) => c,
-            // File may already be gone; match by the original registered path.
-            Err(_) => {
-                let key = self
-                    .watched
-                    .iter()
-                    .find(|(_, original)| original.as_path() == path)
-                    .map(|(canonical, _)| canonical.clone());
-                match key {
-                    Some(key) => key,
-                    None => return,
+        let canonical = path.canonicalize().ok().or_else(|| {
+            self.watched
+                .read()
+                .iter()
+                .find(|(_, file)| file.aliases.contains_key(path))
+                .map(|(canonical, _)| canonical.clone())
+        });
+        let Some(canonical) = canonical else {
+            return;
+        };
+
+        let remove_file = {
+            let mut watched = self.watched.write();
+            let Some(file) = watched.get_mut(&canonical) else {
+                return;
+            };
+            file.refs = file.refs.saturating_sub(1);
+            if let Some(alias_refs) = file.aliases.get_mut(path) {
+                *alias_refs = alias_refs.saturating_sub(1);
+                if *alias_refs == 0 {
+                    file.aliases.remove(path);
                 }
             }
+            if file.refs == 0 {
+                watched.remove(&canonical);
+                true
+            } else {
+                false
+            }
         };
-
-        if self.watched.remove(&canonical).is_none() {
+        if !remove_file {
             return;
         }
-        self.last_reported.remove(&canonical);
 
-        let Some(parent) = canonical.parent() else {
+        self.pending.remove(&canonical);
+        self.pending_paths.write().remove(&canonical);
+        self.snapshot_windows.write().remove(&canonical);
+        let Some(parent) = canonical.parent().map(Path::to_path_buf) else {
             return;
         };
-        let still_used = self.watched.keys().any(|p| p.parent() == Some(parent));
-        if !still_used {
-            let _ = self.watcher.unwatch(parent);
+        let remove_dir = match self.watched_dirs.get_mut(&parent) {
+            Some(file_count) => {
+                *file_count = file_count.saturating_sub(1);
+                *file_count == 0
+            }
+            None => false,
+        };
+        if remove_dir {
+            self.watched_dirs.remove(&parent);
+            let _ = self.watcher.unwatch(&parent);
         }
     }
 
-    /// Drain pending events and return the canonical paths of files that
-    /// changed on disk and are currently registered.
-    pub fn changed_files(&mut self, now: Instant) -> Vec<PathBuf> {
-        let mut changed = Vec::new();
-        while let Ok(res) = self.rx.try_recv() {
-            let Ok(event) = res else {
-                continue;
-            };
-            if !is_content_change(&event) {
-                continue;
-            }
-            for path in event.paths {
-                let Ok(canonical) = path.canonicalize() else {
-                    // File no longer exists - keep showing the last known data.
-                    continue;
-                };
-                if !self.watched.contains_key(&canonical) {
-                    continue;
-                }
-                let debounced = self
-                    .last_reported
-                    .get(&canonical)
-                    .is_some_and(|t| now.duration_since(*t) < RELOAD_DEBOUNCE);
-                if debounced {
-                    continue;
-                }
-                self.last_reported.insert(canonical.clone(), now);
-                if !changed.contains(&canonical) {
-                    changed.push(canonical);
-                }
-            }
+    /// Ignore fingerprint-stable FSEvents caused by QuickCSV's own COW snapshot.
+    pub fn begin_snapshot(&mut self, path: &Path, now: Instant) {
+        let canonical = path.canonicalize().ok().or_else(|| {
+            self.watched
+                .read()
+                .iter()
+                .find(|(_, file)| file.aliases.contains_key(path))
+                .map(|(canonical, _)| canonical.clone())
+        });
+        if let Some(canonical) = canonical {
+            self.snapshot_windows
+                .write()
+                .insert(canonical, now + SNAPSHOT_EVENT_WINDOW);
         }
-        changed
+    }
+
+    /// Drain new events and emit immediate suspend plus trailing-edge reload actions.
+    pub fn poll(&mut self, now: Instant) -> FileChangeBatch {
+        let mut suspend_keys = HashSet::new();
+        while let Ok(canonical) = self.rx.try_recv() {
+            if !self.watched.read().contains_key(&canonical) {
+                continue;
+            }
+            if !self.pending.contains_key(&canonical) {
+                suspend_keys.insert(canonical.clone());
+            }
+            self.pending_paths.write().insert(canonical.clone());
+            self.pending
+                .insert(canonical, PendingChange { last_event_at: now });
+        }
+
+        let reload_keys: Vec<PathBuf> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| now.duration_since(pending.last_event_at) >= RELOAD_DEBOUNCE)
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in &reload_keys {
+            self.pending.remove(path);
+            self.pending_paths.write().remove(path);
+        }
+
+        let next_check = self
+            .pending
+            .values()
+            .map(|pending| {
+                RELOAD_DEBOUNCE.saturating_sub(now.duration_since(pending.last_event_at))
+            })
+            .min();
+        let watched = self.watched.read();
+        let expand_aliases = |keys: &HashSet<PathBuf>| {
+            keys.iter()
+                .filter_map(|key| watched.get(key))
+                .flat_map(|file| file.aliases.keys().cloned())
+                .collect()
+        };
+        let reload_key_set: HashSet<PathBuf> = reload_keys.into_iter().collect();
+
+        FileChangeBatch {
+            suspend: expand_aliases(&suspend_keys),
+            reload: expand_aliases(&reload_key_set),
+            next_check,
+        }
     }
 }
 
@@ -166,21 +346,25 @@ mod tests {
         }
     }
 
+    fn temp_csv(name: &str) -> PathBuf {
+        let unique = format!(
+            "quickcsv-watcher-{}-{name}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after unix epoch")
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
     #[test]
-    fn data_modifications_are_content_changes() {
-        assert!(is_content_change(&event(EventKind::Modify(
-            ModifyKind::Data(DataChange::Any)
-        ))));
+    fn recognizes_only_content_changes() {
         assert!(is_content_change(&event(EventKind::Modify(
             ModifyKind::Data(DataChange::Content)
         ))));
         assert!(is_content_change(&event(EventKind::Modify(
             ModifyKind::Any
         ))));
-    }
-
-    #[test]
-    fn create_remove_and_rename_are_content_changes() {
         assert!(is_content_change(&event(EventKind::Create(
             CreateKind::File
         ))));
@@ -190,16 +374,60 @@ mod tests {
         assert!(is_content_change(&event(EventKind::Modify(
             ModifyKind::Name(notify::event::RenameMode::Any)
         ))));
-    }
-
-    #[test]
-    fn metadata_and_access_events_are_not_content_changes() {
         assert!(!is_content_change(&event(EventKind::Modify(
             ModifyKind::Metadata(MetadataKind::Any)
         ))));
         assert!(!is_content_change(&event(EventKind::Access(
             AccessKind::Read
         ))));
-        assert!(!is_content_change(&event(EventKind::Other)));
+    }
+
+    #[test]
+    fn same_file_registration_is_reference_counted() {
+        let path = temp_csv("refs.csv");
+        std::fs::write(&path, "id\n1\n").expect("should create temp csv");
+        let mut watcher = FileWatcher::new(egui::Context::default()).expect("watcher should start");
+
+        assert!(watcher.register(&path));
+        assert!(watcher.register(&path));
+        watcher.unregister(&path);
+        assert_eq!(watcher.watched.read().len(), 1);
+        watcher.unregister(&path);
+        assert!(watcher.watched.read().is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reload_is_emitted_only_after_quiet_period() {
+        let path = temp_csv("debounce.csv");
+        std::fs::write(&path, "id\n1\n").expect("should create temp csv");
+        let canonical = path.canonicalize().expect("temp csv should canonicalize");
+        let mut watcher = FileWatcher::new(egui::Context::default()).expect("watcher should start");
+        assert!(watcher.register(&path));
+
+        let start = Instant::now();
+        watcher
+            .tx
+            .send(canonical.clone())
+            .expect("event should queue");
+        let first = watcher.poll(start);
+        assert_eq!(first.suspend, vec![path.clone()]);
+        assert!(first.reload.is_empty());
+
+        watcher
+            .tx
+            .send(canonical)
+            .expect("second event should queue");
+        let second = watcher.poll(start + Duration::from_millis(300));
+        assert!(second.suspend.is_empty());
+        assert!(second.reload.is_empty());
+
+        let early = watcher.poll(start + Duration::from_millis(799));
+        assert!(early.reload.is_empty());
+        let settled = watcher.poll(start + Duration::from_millis(800));
+        assert_eq!(settled.reload, vec![path.clone()]);
+
+        let _ = std::fs::remove_file(path);
     }
 }

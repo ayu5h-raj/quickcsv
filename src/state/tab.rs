@@ -8,13 +8,39 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
+
+#[cfg(target_arch = "wasm32")]
+static TAB_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_arch = "wasm32")]
+fn next_tab_id() -> u64 {
+    TAB_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// State for a single tab (one CSV file)
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ExternalReloadState {
+    pub headers: Option<Vec<String>>,
+    pub sort_column: Option<usize>,
+    pub sort_direction: SortDirection,
+}
 
 /// State for a single tab (one CSV file)
 pub struct TabState {
+    /// Stable identity used by asynchronous file pickers and workers
+    #[cfg(target_arch = "wasm32")]
+    pub id: u64,
+    /// Rejects stale asynchronous picker completions for this tab
+    #[cfg(target_arch = "wasm32")]
+    pub load_generation: u64,
     /// Shared state with background thread (CSV data)
     pub state: Arc<RwLock<crate::state::SharedState>>,
+    /// Cancels the indexer for this tab's current load generation
+    pub index_cancel_flag: Arc<AtomicBool>,
     /// File path (desktop) or file name (web)
     pub file_path: String,
     /// Display name (filename only)
@@ -66,6 +92,8 @@ pub struct TabState {
     >,
     /// Whether filtering is currently in progress
     pub is_filtering: Arc<AtomicBool>,
+    /// Cancels the current filter worker without waiting for it on the UI thread
+    pub filter_cancel_flag: Arc<AtomicBool>,
     /// Optimization: Filters that were applied to generate current result
     pub applied_filters: HashMap<usize, FilterCondition>,
     /// Optimization: Sort column used to generate current result
@@ -77,13 +105,21 @@ pub struct TabState {
     /// Whether file_open event has been tracked for this tab
     #[cfg(not(target_arch = "wasm32"))]
     pub file_tracked: bool,
+    /// User intent to restore after a stable external reload finishes
+    #[cfg(not(target_arch = "wasm32"))]
+    pub external_reload: Option<ExternalReloadState>,
 }
 
 impl TabState {
     /// Create a new empty tab
     pub fn new_empty() -> Self {
         Self {
+            #[cfg(target_arch = "wasm32")]
+            id: next_tab_id(),
+            #[cfg(target_arch = "wasm32")]
+            load_generation: 0,
             state: Arc::new(RwLock::new(crate::state::SharedState::default())),
+            index_cancel_flag: Arc::new(AtomicBool::new(false)),
             file_path: String::new(),
             file_name: String::new(),
             scroll_y: 0.0,
@@ -105,12 +141,15 @@ impl TabState {
             was_sorting: false,
             filter_receiver: None,
             is_filtering: Arc::new(AtomicBool::new(false)),
+            filter_cancel_flag: Arc::new(AtomicBool::new(false)),
             applied_filters: HashMap::new(),
             applied_sort_column: None,
             applied_sort_direction: SortDirection::None,
             filter_duration: None,
             #[cfg(not(target_arch = "wasm32"))]
             file_tracked: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            external_reload: None,
         }
     }
 
@@ -125,7 +164,12 @@ impl TabState {
         let file_path = path.to_string_lossy().to_string();
 
         Self {
+            #[cfg(target_arch = "wasm32")]
+            id: next_tab_id(),
+            #[cfg(target_arch = "wasm32")]
+            load_generation: 0,
             state: Arc::new(RwLock::new(crate::state::SharedState::default())),
+            index_cancel_flag: Arc::new(AtomicBool::new(false)),
             file_path,
             file_name,
             scroll_y: 0.0,
@@ -147,12 +191,15 @@ impl TabState {
             was_sorting: false,
             filter_receiver: None,
             is_filtering: Arc::new(AtomicBool::new(false)),
+            filter_cancel_flag: Arc::new(AtomicBool::new(false)),
             applied_filters: HashMap::new(),
             applied_sort_column: None,
             applied_sort_direction: SortDirection::None,
             filter_duration: None,
             #[cfg(not(target_arch = "wasm32"))]
             file_tracked: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            external_reload: None,
         }
     }
 
@@ -161,7 +208,12 @@ impl TabState {
     #[allow(dead_code)] // May be useful for future WASM features
     pub fn from_name(name: String) -> Self {
         Self {
+            #[cfg(target_arch = "wasm32")]
+            id: next_tab_id(),
+            #[cfg(target_arch = "wasm32")]
+            load_generation: 0,
             state: Arc::new(RwLock::new(crate::state::SharedState::default())),
+            index_cancel_flag: Arc::new(AtomicBool::new(false)),
             file_path: name.clone(),
             file_name: name,
             scroll_y: 0.0,
@@ -183,11 +235,20 @@ impl TabState {
             was_sorting: false,
             filter_receiver: None,
             is_filtering: Arc::new(AtomicBool::new(false)),
+            filter_cancel_flag: Arc::new(AtomicBool::new(false)),
             applied_filters: HashMap::new(),
             applied_sort_column: None,
             applied_sort_direction: SortDirection::None,
             filter_duration: None,
         }
+    }
+
+    /// Cancel work for the current file generation without waiting for workers.
+    pub fn cancel_workers(&self) {
+        self.index_cancel_flag.store(true, Ordering::Release);
+        self.sort_state.cancel_flag.store(true, Ordering::Release);
+        self.filter_cancel_flag.store(true, Ordering::Release);
+        self.search.cancel_flag.store(true, Ordering::Release);
     }
 
     /// Check if tab is empty (no file loaded)

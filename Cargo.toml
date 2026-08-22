@@ -85,6 +85,7 @@ ureq = "3.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder"] }
 objc2-foundation = { version = "0.2", features = ["NSAppleEventDescriptor", "NSAppleEventManager", "NSString", "NSURL", "NSObject"] }

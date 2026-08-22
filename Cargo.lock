@@ -2705,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "quickcsv"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "arboard",
  "console_error_panic_hook",
@@ -2718,6 +2718,7 @@ dependencies = [
  "humansize",
  "image",
  "js-sys",
+ "libc",
  "memchr",
  "memmap2",
  "notify",
